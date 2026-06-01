@@ -40,6 +40,11 @@ type ProcessResult struct {
 	Stderr   string
 }
 
+type TestCommandsResult struct {
+	Passed  bool
+	Results []ProcessResult
+}
+
 func RunProcess(ctx context.Context, input ProcessInput) (ProcessResult, error) {
 	cmd := exec.CommandContext(ctx, input.Name, input.Args...)
 	cmd.Dir = input.Dir
@@ -88,6 +93,24 @@ func RunProcess(ctx context.Context, input ProcessInput) (ProcessResult, error) 
 		return result, fmt.Errorf("process failed: %w", waitErr)
 	}
 	return result, nil
+}
+
+func RunTestCommands(ctx context.Context, repoDir string, commands []string, onActivity func(Activity)) (TestCommandsResult, error) {
+	out := TestCommandsResult{Passed: true}
+	for _, command := range commands {
+		result, err := RunProcess(ctx, ProcessInput{
+			Name:       "sh",
+			Args:       []string{"-c", command},
+			Dir:        repoDir,
+			OnActivity: onActivity,
+		})
+		out.Results = append(out.Results, result)
+		if err != nil || result.ExitCode != 0 {
+			out.Passed = false
+			return out, err
+		}
+	}
+	return out, nil
 }
 
 func copyActivity(dst *bytes.Buffer, src io.Reader, kind string, onActivity func(Activity), done chan<- error) {
