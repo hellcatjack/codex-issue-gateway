@@ -1,14 +1,25 @@
 package server
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
+
+	"github.com/hellcatjack/codex-issue-gateway/internal/authz"
+	"github.com/hellcatjack/codex-issue-gateway/internal/commands"
+	"github.com/hellcatjack/codex-issue-gateway/internal/config"
+	"github.com/hellcatjack/codex-issue-gateway/internal/github"
+	"github.com/hellcatjack/codex-issue-gateway/internal/queue"
+	"github.com/hellcatjack/codex-issue-gateway/internal/webhook"
 )
 
 type Dependencies struct {
-	Config        any
-	Queue         any
-	GitHub        any
+	Config        *config.Config
+	Queue         *queue.Store
+	GitHub        github.Client
 	WebhookSecret []byte
 }
 
@@ -42,11 +53,131 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusNotImplemented, map[string]any{"accepted": false, "reason": "not_implemented"})
+	if s.deps.Config == nil || s.deps.Queue == nil {
+		writeJSON(w, http.StatusServiceUnavailable, WebhookResponse{Accepted: false, Reason: "not_ready"})
+		return
+	}
+	body, err := readLimitedBody(r, s.deps.Config.Server.MaxBodyBytes)
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, WebhookResponse{Accepted: false, Reason: "body_too_large"})
+		return
+	}
+	if err := webhook.VerifySignature(body, r.Header.Get("X-Hub-Signature-256"), s.deps.WebhookSecret); err != nil {
+		writeJSON(w, http.StatusUnauthorized, WebhookResponse{Accepted: false, Reason: "signature_invalid"})
+		return
+	}
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	eventType := r.Header.Get("X-GitHub-Event")
+	if deliveryID == "" || eventType == "" {
+		writeJSON(w, http.StatusBadRequest, WebhookResponse{Accepted: false, Reason: "missing_headers"})
+		return
+	}
+	event, err := webhook.Normalize(eventType, deliveryID, body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, WebhookResponse{Accepted: false, Reason: "json_invalid"})
+		return
+	}
+	if event.EventType != "issue_comment" && event.EventType != "issues" {
+		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: true, DeliveryID: deliveryID})
+		return
+	}
+	repo, ok := s.deps.Config.Repo(event.RepoFullName)
+	if !ok {
+		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: false, DeliveryID: deliveryID, Reason: "repo_not_allowed"})
+		return
+	}
+	delivery, err := s.deps.Queue.RecordDelivery(r.Context(), queue.Delivery{
+		ID:           deliveryID,
+		EventType:    event.EventType,
+		RepoFullName: event.RepoFullName,
+		IssueNumber:  event.IssueNumber,
+		Actor:        event.Actor,
+		BodySHA256:   sha256Hex(body),
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, WebhookResponse{Accepted: false, Reason: "queue_failed"})
+		return
+	}
+	if delivery.Duplicate {
+		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: true, Duplicate: true, DeliveryID: deliveryID})
+		return
+	}
+	bodyForCommands := event.CommentBody
+	if bodyForCommands == "" {
+		bodyForCommands = event.IssueBody
+	}
+	cmds, err := commands.ParseBody(bodyForCommands, commands.Options{AllowedBases: repo.BaseBranches, MaxNoActivityMinutes: s.deps.Config.Worker.NoActivityTimeoutMinutes})
+	if err != nil || len(cmds) == 0 {
+		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: false, DeliveryID: deliveryID, Reason: "command_invalid"})
+		return
+	}
+	cmd := cmds[0]
+	decision := authz.Authorize(r.Context(), authz.Input{
+		Repo:        repo,
+		Actor:       event.Actor,
+		Command:     cmd,
+		IssueLabels: event.Labels,
+		IssueClosed: event.Closed,
+		IssueLocked: event.Locked,
+		IssueHash:   sha256Hex([]byte(event.IssueTitle + "\n" + event.IssueBody)),
+	})
+	if !decision.Allowed {
+		commentTrusted(r.Context(), s.deps.GitHub, event.RepoFullName, event.IssueNumber, "Codex Gateway 拒绝执行此请求。\n\n- 原因: "+decision.Reason)
+		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: false, DeliveryID: deliveryID, Reason: decision.Reason})
+		return
+	}
+	base := cmd.Flags.Base
+	if base == "" && len(repo.BaseBranches) > 0 {
+		base = repo.BaseBranches[0]
+	}
+	job, err := s.deps.Queue.CreateJob(r.Context(), queue.CreateJobInput{
+		DeliveryID:   deliveryID,
+		RepoFullName: event.RepoFullName,
+		IssueNumber:  event.IssueNumber,
+		CommentID:    event.CommentID,
+		Actor:        event.Actor,
+		Command:      string(cmd.Name),
+		BaseBranch:   base,
+		WorkBranch:   cmd.Flags.Branch,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, WebhookResponse{Accepted: false, DeliveryID: deliveryID, Reason: "queue_failed"})
+		return
+	}
+	commentTrusted(r.Context(), s.deps.GitHub, event.RepoFullName, event.IssueNumber, "Codex Gateway 已接收请求。\n\n- Job: `"+job.ID+"`\n- 命令: `/codex "+string(cmd.Name)+"`\n- 状态: `queued`")
+	writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: true, DeliveryID: deliveryID, JobID: job.ID})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+type WebhookResponse struct {
+	Accepted   bool   `json:"accepted"`
+	Duplicate  bool   `json:"duplicate,omitempty"`
+	DeliveryID string `json:"delivery_id,omitempty"`
+	JobID      string `json:"job_id,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+func readLimitedBody(r *http.Request, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = 2 * 1024 * 1024
+	}
+	defer r.Body.Close()
+	return io.ReadAll(http.MaxBytesReader(nil, r.Body, maxBytes))
+}
+
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func commentTrusted(ctx context.Context, gh github.Client, repoFullName string, issueNumber int, body string) {
+	if gh == nil {
+		return
+	}
+	_ = gh.CreateIssueComment(ctx, repoFullName, issueNumber, body)
 }
