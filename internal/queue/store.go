@@ -177,6 +177,69 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (Job, error) {
 	return scanJob(row)
 }
 
+func (s *Store) LeaseNext(ctx context.Context) (Job, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Job{}, false, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRowContext(ctx, `SELECT id, delivery_id, repo_full_name, issue_number, comment_id, actor, command,
+		flags_json, state, base_branch, work_branch, pr_number, created_at, worker_heartbeat_at, job_activity_at, last_error
+		FROM jobs WHERE state = ? ORDER BY created_at LIMIT 1`, StateQueued)
+	job, err := scanJob(row)
+	if err == sql.ErrNoRows {
+		return Job{}, false, nil
+	}
+	if err != nil {
+		return Job{}, false, err
+	}
+	now := time.Now()
+	res, err := tx.ExecContext(ctx, `UPDATE jobs SET state = ?, worker_heartbeat_at = ?, job_activity_at = ? WHERE id = ? AND state = ?`,
+		StateStarting, formatTime(now), formatTime(now), job.ID, StateQueued)
+	if err != nil {
+		return Job{}, false, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return Job{}, false, err
+	}
+	if rows == 0 {
+		return Job{}, false, nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO job_events
+		(job_id, from_state, to_state, reason, public_message, internal_message, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		job.ID, StateQueued, StateStarting, "leased", "worker leased job", "worker", formatTime(now)); err != nil {
+		return Job{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Job{}, false, err
+	}
+	job.State = StateStarting
+	job.WorkerHeartbeatAt = now
+	job.JobActivityAt = now
+	return job, true, nil
+}
+
+func (s *Store) SetState(ctx context.Context, jobID string, state State, lastError string) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET state = ?, last_error = ?, worker_heartbeat_at = ?, job_activity_at = ? WHERE id = ?`,
+		state, lastError, formatTime(now), formatTime(now), jobID)
+	return err
+}
+
+func (s *Store) TouchActivity(ctx context.Context, jobID string) error {
+	now := time.Now()
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET worker_heartbeat_at = ?, job_activity_at = ? WHERE id = ?`,
+		formatTime(now), formatTime(now), jobID)
+	return err
+}
+
+func (s *Store) SetPRNumber(ctx context.Context, jobID string, prNumber int) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE jobs SET pr_number = ? WHERE id = ?`, prNumber, jobID)
+	return err
+}
+
 func (s *Store) JobsByIssue(ctx context.Context, repoFullName string, issueNumber int) ([]Job, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, delivery_id, repo_full_name, issue_number, comment_id, actor, command,
 		flags_json, state, base_branch, work_branch, pr_number, created_at, worker_heartbeat_at, job_activity_at, last_error
