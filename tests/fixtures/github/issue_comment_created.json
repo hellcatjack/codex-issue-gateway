@@ -1,0 +1,25 @@
+{
+  "action": "created",
+  "repository": {
+    "full_name": "funland/foliospace-Library"
+  },
+  "sender": {
+    "login": "hellcatjack"
+  },
+  "issue": {
+    "number": 2,
+    "title": "Add gateway integration test",
+    "body": "Please prepare a safe implementation plan.",
+    "state": "open",
+    "locked": false,
+    "labels": [
+      {
+        "name": "codex:ready"
+      }
+    ]
+  },
+  "comment": {
+    "id": 1001,
+    "body": "/codex plan"
+  }
+}

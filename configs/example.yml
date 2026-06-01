@@ -1,0 +1,67 @@
+server:
+  listen: "127.0.0.1:18090"
+  public_base_url: "https://gateway.example.com"
+  max_body_bytes: 2097152
+
+github:
+  app_id: 123456
+  installation_id: 789012
+  private_key_file: "/etc/codex-issue-gateway/github-app.pem"
+  webhook_secret_file: "/etc/codex-issue-gateway/webhook-secret"
+
+queue:
+  dsn: "/var/lib/codex-issue-gateway/gateway.db"
+  max_global_running: 1
+
+worker:
+  enabled: true
+  job_root: "/tmp/codex-issue-gateway/jobs"
+  stale_lease_after_minutes: 15
+  no_activity_timeout_minutes: 45
+  absolute_job_timeout_minutes: 720
+  phase_no_activity_timeout_minutes:
+    planning: 30
+    implementing: 60
+    testing: 45
+    creating_pr: 20
+
+repos:
+  - full_name: "funland/foliospace-Library"
+    clone_url: "git@github.com:funland/foliospace-Library.git"
+    local_fixture_path: "/app/devs/foliospace-Library"
+    fork_push_remote: "git@github.com:hellcatjack/foliospace-Library.git"
+    base_branches: ["main"]
+    protected_branches: ["main", "master", "release/*"]
+    required_labels_for_implement: ["codex:ready"]
+    allowed_actors:
+      admins: ["hellcatjack"]
+      maintainers: ["hellcatjack"]
+      operators: []
+      requesters: []
+    commit_author:
+      name: "hellcatjack"
+      email: "hellcatjack@gmail.com"
+    test_commands:
+      - "go test ./..."
+      - "npm --prefix web run build"
+      - "git diff --check"
+    deny_paths:
+      - ".env"
+      - ".env.*"
+      - "**/*secret*"
+      - "**/*token*"
+      - "docker-compose.yml"
+    review_required_paths:
+      - ".github/workflows/**"
+      - "Dockerfile"
+      - "scripts/**"
+      - "cmd/**/main.go"
+    codex:
+      sandbox: "workspace-write"
+      ask_for_approval: "never"
+      ephemeral: true
+      json_events: true
+    concurrency:
+      max_running: 1
+    labels:
+      needs_security_review: "codex:needs-security-review"
