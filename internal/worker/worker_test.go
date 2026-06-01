@@ -65,6 +65,9 @@ func TestWorkerCreatesPRAfterTestsAndDiffPass(t *testing.T) {
 	if got.State != queue.StateDone || len(deps.GitHub.PullRequests) != 1 {
 		t.Fatalf("job=%#v prs=%#v", got, deps.GitHub.PullRequests)
 	}
+	if deps.GitHub.PullRequests[0].Head != "codex/issue-2-delivery-implement" {
+		t.Fatalf("pr head = %q", deps.GitHub.PullRequests[0].Head)
+	}
 }
 
 type workerTestDeps struct {

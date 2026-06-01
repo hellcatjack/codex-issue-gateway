@@ -57,6 +57,12 @@ func (w *Worker) RunOne(ctx context.Context) error {
 		_ = w.Queue.SetState(ctx, job.ID, queue.StateFailed, err.Error())
 		return err
 	}
+	branch, err := sandbox.WorkBranch(w.Repo, job.IssueNumber, job.DeliveryID, job.WorkBranch)
+	if err != nil {
+		_ = w.Queue.SetState(ctx, job.ID, queue.StateFailed, err.Error())
+		return err
+	}
+	job.WorkBranch = branch
 	switch job.Command {
 	case "plan":
 		return w.runPlan(ctx, job, ws)
