@@ -31,7 +31,7 @@ Each repository gets its own policy:
 - Required labels for implementation commands.
 - Test command allowlist.
 - Denylist and review-required file path rules.
-- Codex timeout and sandbox options.
+- Codex watchdog and sandbox options.
 - Per-repo concurrency limits.
 
 ## Architecture
@@ -70,6 +70,50 @@ Packages:
 13. Worker evaluates diff policy.
 14. Worker commits, pushes to the configured remote, creates or updates a PR, and comments on the Issue.
 
+## Non-Interactive Execution Contract
+
+Worker execution must never block waiting for a human or an interactive Codex prompt.
+
+Planning is the only phase allowed to ask clarifying questions. `/codex plan` can produce assumptions, missing requirements, acceptance criteria, risks, and questions in an Issue comment. Implementation-class commands such as `/codex implement`, `/codex fix`, and `/codex review` must produce one complete result per run: success, failure, or a request for plan revision.
+
+The worker enforces this contract mechanically:
+
+- Codex runs through `codex exec`, not an interactive session.
+- The worker writes the complete prompt to stdin once and then closes stdin.
+- `--ask-for-approval never` is mandatory.
+- The worker does not expose a channel for Codex to ask the user follow-up questions during execution.
+- If Codex reports missing requirements, the runner records `needs_plan_revision`, releases the worker lease, and posts one complete feedback comment to the Issue.
+
+Execution prompts must explicitly instruct Codex:
+
+- Do not ask the user questions.
+- Do not wait for clarification.
+- Use the approved plan assumptions when safe.
+- Stop with `needs_plan_revision` when safe implementation is impossible.
+- Return all missing information in one response.
+
+## Plan Readiness Gate
+
+`/codex implement` and `/codex fix` require a ready implementation context.
+
+A ready context can come from either:
+
+- The latest `/codex plan` artifact for the Issue has `ready_for_implementation: true`.
+- A maintainer applies the configured ready label, such as `codex:ready`, and the repo policy allows label-based readiness.
+
+Plan artifacts are stored with:
+
+- Plan artifact id.
+- Issue title/body hash at planning time.
+- Relevant command/comment id.
+- Base branch.
+- Assumptions.
+- Acceptance criteria.
+- Open questions.
+- `ready_for_implementation`.
+
+If the Issue body or triggering requirement comments change after the ready plan, the gateway rejects implementation and asks for a new `/codex plan`, unless a maintainer explicitly overrides through a future policy flag. The MVP default is no override.
+
 ## Command Protocol
 
 Commands are recognized only when they appear as a standalone line:
@@ -93,9 +137,9 @@ MVP flags:
 - `--branch <safe-name>`
 - `--base <allowed-base-branch>`
 - `--dry-run`
-- `--max-minutes <1-120>`
+- `--no-activity-minutes <30-240>`
 
-The parser rejects unknown commands, unknown flags, unsafe branch names, bases outside repo policy, and max-minute values over the repo cap.
+The parser rejects unknown commands, unknown flags, unsafe branch names, bases outside repo policy, and no-activity values outside the repo cap. The MVP intentionally does not expose a normal `--max-minutes` flag because total elapsed time is not the stuck-job signal.
 
 ## Authorization Model
 
@@ -118,7 +162,7 @@ SQLite is the MVP queue.
 Tables:
 
 - `webhook_deliveries`: delivery id, event type, repo, issue, actor, body hash, status, received timestamp.
-- `jobs`: job id, delivery id, repo, issue, comment, actor, command, flags JSON, state, base branch, work branch, PR number, timestamps, last error.
+- `jobs`: job id, delivery id, repo, issue, comment, actor, command, flags JSON, state, base branch, work branch, PR number, timestamps, last error, worker heartbeat timestamp, job activity timestamp.
 - `job_events`: append-only state transition audit records.
 - `job_artifacts`: stored logs, summaries, diffs, and checksums.
 
@@ -129,7 +173,7 @@ The queue enforces:
 - Duplicate delivery ids do not create duplicate jobs.
 - One active job per repo/issue by default.
 - Configurable global and per-repo running limits.
-- Timeouts transition running jobs to `expired`.
+- No-activity watchdog expiry transitions stuck running jobs to `expired`.
 
 ## Worker Isolation
 
@@ -163,6 +207,42 @@ CODEX_HOME=<job>/codex-home codex exec \
 ```
 
 The gateway rejects configuration that requests `danger-full-access` or approval bypass options.
+
+## Progress-Based Watchdog
+
+The worker must avoid false timeouts for long but active jobs. Timeout decisions are based on lack of activity, not normal elapsed job duration.
+
+The system tracks two separate timestamps:
+
+- `worker_heartbeat_at`: the worker process is alive and can update the queue.
+- `job_activity_at`: the current job is making observable progress.
+
+The worker refreshes `job_activity_at` when any of these signals appear:
+
+- Codex stdout or stderr receives new bytes.
+- A test command stdout or stderr receives new bytes.
+- The child process CPU time increases.
+- An artifact file is created or grows.
+- The job worktree diff changes.
+- The job phase changes, such as `implementing -> testing`.
+
+Default watchdog configuration is intentionally loose:
+
+```yaml
+worker:
+  stale_lease_after_minutes: 15
+  no_activity_timeout_minutes: 45
+  phase_no_activity_timeout_minutes:
+    planning: 30
+    implementing: 60
+    testing: 45
+    creating_pr: 20
+  absolute_job_timeout_minutes: 720
+```
+
+`no_activity_timeout_minutes` is the normal stuck-job detector. `absolute_job_timeout_minutes` is only a disaster guard for runaway processes or watchdog bugs.
+
+When a child process is alive but no activity signal appears beyond the phase threshold, the worker kills the process tree, stores the final logs, marks the job `expired`, and posts a single Issue comment. If `worker_heartbeat_at` becomes stale because a worker died, the queue may recover the lease and either requeue or fail the job based on its phase and retry policy.
 
 ## Diff And PR Policy
 
@@ -219,8 +299,13 @@ Unit coverage:
 - SQLite schema and state transitions.
 - Active job limits.
 - Worker leasing.
+- Worker heartbeat and job activity tracking.
+- No-activity watchdog expiry without using normal elapsed duration.
 - Sandbox directory creation.
 - Codex command assembly.
+- Non-interactive Codex execution closes stdin after one prompt.
+- `needs_plan_revision` releases the worker lease and comments once.
+- Implement commands require a ready plan or configured ready label.
 - Test command failure prevents PR creation.
 - Denylist blocks `docker-compose.yml` and `.env`.
 - Logs do not include webhook secrets.
