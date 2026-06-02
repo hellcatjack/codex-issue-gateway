@@ -14,12 +14,34 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/hellcatjack/codex-issue-gateway/internal/publiccomment"
 )
 
 type Client interface {
 	CreateIssueComment(ctx context.Context, repoFullName string, issueNumber int, body string) error
 	CreatePullRequest(ctx context.Context, input PullRequestInput) (PullRequest, error)
 	AddLabels(ctx context.Context, repoFullName string, issueNumber int, labels []string) error
+	FetchIssueContext(ctx context.Context, repoFullName string, issueNumber int) (IssueContext, error)
+}
+
+type IssueContext struct {
+	RepoFullName      string
+	Number            int
+	Title             string
+	Body              string
+	Author            string
+	AuthorAssociation string
+	State             string
+	Locked            bool
+	Labels            []string
+	Comments          []IssueContextComment
+}
+
+type IssueContextComment struct {
+	ID                int64
+	Author            string
+	AuthorAssociation string
+	Body              string
 }
 
 type PullRequestInput struct {
@@ -93,8 +115,13 @@ func (c *AppClient) InstallationToken(ctx context.Context) (string, error) {
 }
 
 func (c *AppClient) CreateIssueComment(ctx context.Context, repoFullName string, issueNumber int, body string) error {
-	var out any
-	return c.installationRequest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/comments", repoFullName, issueNumber), map[string]string{"body": body}, &out)
+	for _, chunk := range publiccomment.SafeChunks(body) {
+		var out any
+		if err := c.installationRequest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/comments", repoFullName, issueNumber), map[string]string{"body": chunk}, &out); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *AppClient) CreatePullRequest(ctx context.Context, input PullRequestInput) (PullRequest, error) {
@@ -103,10 +130,10 @@ func (c *AppClient) CreatePullRequest(ctx context.Context, input PullRequestInpu
 		HTMLURL string `json:"html_url"`
 	}
 	err := c.installationRequest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/pulls", input.RepoFullName), map[string]string{
-		"title": input.Title,
+		"title": publiccomment.SafeTitle(input.Title),
 		"head":  input.Head,
 		"base":  input.Base,
-		"body":  input.Body,
+		"body":  publiccomment.Safe(input.Body),
 	}, &out)
 	return PullRequest{Number: out.Number, URL: out.HTMLURL}, err
 }
@@ -114,6 +141,79 @@ func (c *AppClient) CreatePullRequest(ctx context.Context, input PullRequestInpu
 func (c *AppClient) AddLabels(ctx context.Context, repoFullName string, issueNumber int, labels []string) error {
 	var out any
 	return c.installationRequest(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/issues/%d/labels", repoFullName, issueNumber), map[string][]string{"labels": labels}, &out)
+}
+
+func (c *AppClient) FetchIssueContext(ctx context.Context, repoFullName string, issueNumber int) (IssueContext, error) {
+	var issue struct {
+		Number            int    `json:"number"`
+		Title             string `json:"title"`
+		Body              string `json:"body"`
+		State             string `json:"state"`
+		Locked            bool   `json:"locked"`
+		AuthorAssociation string `json:"author_association"`
+		User              struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Labels []struct {
+			Name string `json:"name"`
+		} `json:"labels"`
+	}
+	if err := c.installationRequest(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/issues/%d", repoFullName, issueNumber), nil, &issue); err != nil {
+		return IssueContext{}, err
+	}
+	commentsRaw, err := c.fetchIssueComments(ctx, repoFullName, issueNumber)
+	if err != nil {
+		return IssueContext{}, err
+	}
+	labels := make([]string, 0, len(issue.Labels))
+	for _, label := range issue.Labels {
+		labels = append(labels, label.Name)
+	}
+	comments := make([]IssueContextComment, 0, len(commentsRaw))
+	for _, comment := range commentsRaw {
+		comments = append(comments, IssueContextComment{
+			ID:                comment.ID,
+			Author:            comment.User.Login,
+			AuthorAssociation: comment.AuthorAssociation,
+			Body:              comment.Body,
+		})
+	}
+	return IssueContext{
+		RepoFullName:      repoFullName,
+		Number:            issue.Number,
+		Title:             issue.Title,
+		Body:              issue.Body,
+		Author:            issue.User.Login,
+		AuthorAssociation: issue.AuthorAssociation,
+		State:             issue.State,
+		Locked:            issue.Locked,
+		Labels:            labels,
+		Comments:          comments,
+	}, nil
+}
+
+func (c *AppClient) fetchIssueComments(ctx context.Context, repoFullName string, issueNumber int) ([]issueCommentResponse, error) {
+	var all []issueCommentResponse
+	for page := 1; ; page++ {
+		var pageComments []issueCommentResponse
+		path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100&page=%d", repoFullName, issueNumber, page)
+		if err := c.installationRequest(ctx, http.MethodGet, path, nil, &pageComments); err != nil {
+			return nil, err
+		}
+		all = append(all, pageComments...)
+		if len(pageComments) < 100 {
+			return all, nil
+		}
+	}
+}
+
+type issueCommentResponse struct {
+	ID                int64  `json:"id"`
+	Body              string `json:"body"`
+	AuthorAssociation string `json:"author_association"`
+	User              struct {
+		Login string `json:"login"`
+	} `json:"user"`
 }
 
 func (c *AppClient) installationRequest(ctx context.Context, method, path string, payload any, out any) error {

@@ -47,8 +47,17 @@ func TestLoadBuildsRepoIndexAndDefaults(t *testing.T) {
 	if repo.Codex.Sandbox != "workspace-write" {
 		t.Fatalf("sandbox = %q", repo.Codex.Sandbox)
 	}
+	if repo.Codex.AuthSourceDir != "/home/runner/.codex" {
+		t.Fatalf("auth source dir = %q", repo.Codex.AuthSourceDir)
+	}
 	if cfg.Worker.NoActivityTimeoutMinutes != 45 {
 		t.Fatalf("no activity timeout = %d", cfg.Worker.NoActivityTimeoutMinutes)
+	}
+	if cfg.Server.PublicBaseURL != "https://gateway.example.test" {
+		t.Fatalf("public base url = %q", cfg.Server.PublicBaseURL)
+	}
+	if len(repo.AgentSetupCommands) != 1 || repo.AgentSetupCommands[0] != "test -d node_modules || cp -a /cache/node_modules ./node_modules" {
+		t.Fatalf("agent setup commands = %#v", repo.AgentSetupCommands)
 	}
 }
 
@@ -56,6 +65,7 @@ func validConfigYAML() string {
 	return `
 server:
   listen: "127.0.0.1:18090"
+  public_base_url: "https://gateway.example.test"
 github:
   app_id: 1
   installation_id: 2
@@ -71,6 +81,9 @@ repos:
     allowed_actors:
       maintainers: ["hellcatjack"]
     deny_paths: [".env", "docker-compose.yml"]
+    agent_setup_commands: ["test -d node_modules || cp -a /cache/node_modules ./node_modules"]
     test_commands: ["go test ./..."]
+    codex:
+      auth_source_dir: "/home/runner/.codex"
 `
 }

@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/hellcatjack/codex-issue-gateway/internal/authz"
 	"github.com/hellcatjack/codex-issue-gateway/internal/commands"
@@ -28,10 +31,13 @@ type Server struct {
 	mux  *http.ServeMux
 }
 
+const commandActor = "hellcatjack"
+
 func New(deps Dependencies) *Server {
 	s := &Server{deps: deps, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/readyz", s.handleReadyz)
+	s.mux.HandleFunc("/artifacts/", s.handleArtifact)
 	s.mux.HandleFunc("/github/webhook", s.handleWebhook)
 	return s
 }
@@ -46,6 +52,48 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "queue": "ok", "github": "ok"})
+}
+
+func (s *Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if s.deps.Config == nil || strings.TrimSpace(s.deps.Config.Worker.JobRoot) == "" {
+		http.NotFound(w, r)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/artifacts/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || !safeArtifactSegment(parts[0]) || !safeArtifactFile(parts[1]) {
+		http.NotFound(w, r)
+		return
+	}
+	filePath := filepath.Join(s.deps.Config.Worker.JobRoot, parts[0], "artifacts", "public", parts[1])
+	info, err := os.Lstat(filePath)
+	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	header := make([]byte, 512)
+	n, _ := file.Read(header)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	contentType := http.DetectContentType(header[:n])
+	if !strings.HasPrefix(contentType, "image/") {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	http.ServeContent(w, r, parts[1], info.ModTime(), file)
 }
 
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +150,14 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: true, Duplicate: true, DeliveryID: deliveryID})
 		return
 	}
+	if !commandActionAllowed(event) {
+		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: false, DeliveryID: deliveryID, Reason: "command_action_ignored"})
+		return
+	}
+	if event.Actor != commandActor {
+		writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: false, DeliveryID: deliveryID, Reason: "command_actor_not_allowed"})
+		return
+	}
 	bodyForCommands := event.CommentBody
 	if bodyForCommands == "" {
 		bodyForCommands = event.IssueBody
@@ -144,8 +200,36 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, WebhookResponse{Accepted: false, DeliveryID: deliveryID, Reason: "queue_failed"})
 		return
 	}
-	commentTrusted(r.Context(), s.deps.GitHub, event.RepoFullName, event.IssueNumber, "Codex Gateway 已接收请求。\n\n- Job: `"+job.ID+"`\n- 命令: `/codex "+string(cmd.Name)+"`\n- 状态: `queued`")
+	commentTrusted(r.Context(), s.deps.GitHub, event.RepoFullName, event.IssueNumber, "Codex Gateway 已接收请求。\n\n- 命令: `/codex "+string(cmd.Name)+"`\n- 状态: `queued`")
 	writeJSON(w, http.StatusAccepted, WebhookResponse{Accepted: true, DeliveryID: deliveryID, JobID: job.ID})
+}
+
+func safeArtifactSegment(segment string) bool {
+	if segment == "" || segment == "." || segment == ".." {
+		return false
+	}
+	for _, r := range segment {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safeArtifactFile(file string) bool {
+	if file == "" || file == "." || file == ".." || filepath.Base(file) != file || strings.ContainsRune(file, 0) {
+		return false
+	}
+	if !safeArtifactSegment(strings.TrimSuffix(file, filepath.Ext(file))) {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(file)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -180,4 +264,15 @@ func commentTrusted(ctx context.Context, gh github.Client, repoFullName string, 
 		return
 	}
 	_ = gh.CreateIssueComment(ctx, repoFullName, issueNumber, body)
+}
+
+func commandActionAllowed(event webhook.NormalizedEvent) bool {
+	switch event.EventType {
+	case "issue_comment":
+		return event.Action == "created" || event.Action == "edited"
+	case "issues":
+		return event.Action == "opened" || event.Action == "edited"
+	default:
+		return false
+	}
 }

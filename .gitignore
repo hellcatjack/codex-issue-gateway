@@ -1,7 +1,9 @@
 .worktrees/
+.playwright-mcp/
 *.db
 *.db-shm
 *.db-wal
 bin/
 coverage.out
 tmp/
+issue-*-feedback.png

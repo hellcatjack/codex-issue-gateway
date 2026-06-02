@@ -15,6 +15,7 @@ queue:
 
 worker:
   enabled: true
+  codex_binary: "codex"
   job_root: "/tmp/codex-issue-gateway/jobs"
   stale_lease_after_minutes: 15
   no_activity_timeout_minutes: 45
@@ -41,6 +42,8 @@ repos:
     commit_author:
       name: "hellcatjack"
       email: "hellcatjack@gmail.com"
+    agent_setup_commands:
+      - "test -d node_modules || cp -a /var/cache/my-repo/node_modules ./node_modules"
     test_commands:
       - "go test ./..."
       - "npm --prefix web run build"

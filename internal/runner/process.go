@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -135,20 +134,21 @@ func copyActivity(dst *bytes.Buffer, src io.Reader, kind string, onActivity func
 }
 
 func mergeEnv(extra map[string]string) []string {
-	env := os.Environ()
+	values := map[string]string{}
+	if path := os.Getenv("PATH"); path != "" {
+		values["PATH"] = path
+	}
+	values["HOME"] = os.TempDir()
+	values["TMPDIR"] = os.TempDir()
 	for k, v := range extra {
-		prefix := k + "="
-		replaced := false
-		for i := range env {
-			if strings.HasPrefix(env[i], prefix) {
-				env[i] = prefix + v
-				replaced = true
-				break
-			}
+		values[k] = v
+		if k == "CODEX_HOME" {
+			values["HOME"] = v
 		}
-		if !replaced {
-			env = append(env, prefix+v)
-		}
+	}
+	env := make([]string, 0, len(values))
+	for k, v := range values {
+		env = append(env, k+"="+v)
 	}
 	return env
 }

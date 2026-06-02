@@ -19,8 +19,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen       string `yaml:"listen"`
-	MaxBodyBytes int64  `yaml:"max_body_bytes"`
+	Listen        string `yaml:"listen"`
+	PublicBaseURL string `yaml:"public_base_url"`
+	MaxBodyBytes  int64  `yaml:"max_body_bytes"`
 }
 
 type GitHubConfig struct {
@@ -37,6 +38,7 @@ type QueueConfig struct {
 
 type WorkerConfig struct {
 	Enabled                   bool           `yaml:"enabled"`
+	CodexBinary               string         `yaml:"codex_binary"`
 	JobRoot                   string         `yaml:"job_root"`
 	StaleLeaseAfterMinutes    int            `yaml:"stale_lease_after_minutes"`
 	NoActivityTimeoutMinutes  int            `yaml:"no_activity_timeout_minutes"`
@@ -54,6 +56,7 @@ type RepoConfig struct {
 	RequiredLabelsForImplement []string          `yaml:"required_labels_for_implement"`
 	AllowedActors              ActorRoles        `yaml:"allowed_actors"`
 	CommitAuthor               CommitAuthor      `yaml:"commit_author"`
+	AgentSetupCommands         []string          `yaml:"agent_setup_commands"`
 	TestCommands               []string          `yaml:"test_commands"`
 	DenyPaths                  []string          `yaml:"deny_paths"`
 	ReviewRequiredPaths        []string          `yaml:"review_required_paths"`
@@ -79,6 +82,7 @@ type CodexConfig struct {
 	AskForApproval string `yaml:"ask_for_approval"`
 	Ephemeral      bool   `yaml:"ephemeral"`
 	JSONEvents     bool   `yaml:"json_events"`
+	AuthSourceDir  string `yaml:"auth_source_dir"`
 }
 
 type RepoConcurrency struct {
