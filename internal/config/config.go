@@ -48,6 +48,7 @@ type WorkerConfig struct {
 	PhaseNoActivityTimeouts      map[string]int   `yaml:"phase_no_activity_timeout_minutes"`
 	AbsoluteJobTimeoutMinutes    int              `yaml:"absolute_job_timeout_minutes"`
 	ImplementationRepairAttempts int              `yaml:"implementation_repair_attempts"`
+	VisualReviewAttempts         int              `yaml:"visual_review_attempts"`
 }
 
 type PlaywrightConfig struct {
@@ -69,6 +70,7 @@ type RepoConfig struct {
 	CommitAuthor               CommitAuthor      `yaml:"commit_author"`
 	AgentSetupCommands         []string          `yaml:"agent_setup_commands"`
 	TestCommands               []string          `yaml:"test_commands"`
+	VisualReviewCommands       []string          `yaml:"visual_review_commands"`
 	DenyPaths                  []string          `yaml:"deny_paths"`
 	ReviewRequiredPaths        []string          `yaml:"review_required_paths"`
 	Codex                      CodexConfig       `yaml:"codex"`
@@ -153,6 +155,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Worker.ImplementationRepairAttempts == 0 {
 		c.Worker.ImplementationRepairAttempts = 8
+	}
+	if c.Worker.VisualReviewAttempts == 0 {
+		c.Worker.VisualReviewAttempts = 3
 	}
 	if c.Worker.PhaseNoActivityTimeouts == nil {
 		c.Worker.PhaseNoActivityTimeouts = map[string]int{

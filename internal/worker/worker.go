@@ -205,6 +205,11 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 	result := CodexResult{}
 	repairAttempts := 0
 	maxRepairAttempts := w.implementationRepairAttempts()
+	visualAttempts := 0
+	maxVisualAttempts := w.visualReviewAttempts()
+	visualConfirmationPending := false
+	visualConfirmationFingerprint := ""
+	lastVisualReport := ""
 	prompt := prepared.Text
 	imageFiles := append([]string(nil), prepared.ImageFiles...)
 	for {
@@ -227,32 +232,99 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 			continue
 		}
 		if result.Status == "needs_plan_revision" {
+			if len(repo.VisualReviewCommands) > 0 && visualAttempts < maxVisualAttempts {
+				visual, visualErr := w.runVisualReview(ctx, repo, job, ws)
+				if visualErr != nil {
+					_ = w.Queue.SetState(ctx, job.ID, queue.StateFailed, visualErr.Error())
+					return visualErr
+				}
+				report := appendPublicSection(result.PublicReport, visual.Report)
+				visualAttempts++
+				if visual.Passed {
+					if fingerprint, fingerprintErr := workspacePatchFingerprint(ctx, ws.RepoDir); fingerprintErr == nil {
+						visualConfirmationPending = true
+						visualConfirmationFingerprint = fingerprint
+					}
+					lastVisualReport = visual.Report
+					prompt = visualReviewPrompt(prepared.Text, visualAttempts, maxVisualAttempts, report)
+					imageFiles = mergeImageFiles(prepared.ImageFiles, visual.ImageFiles)
+					continue
+				}
+				if repairAttempts >= maxRepairAttempts {
+					return w.requestImplementationPlanRevision(ctx, job, report, visual.LastError)
+				}
+				repairAttempts++
+				prompt = repairPrompt(prepared.Text, repairAttempts, maxRepairAttempts, "Codex requested plan revision and gateway visual review did not pass.", report)
+				imageFiles = mergeImageFiles(prepared.ImageFiles, visual.ImageFiles)
+				continue
+			}
 			_ = w.comment(ctx, job, "Codex 需要修订计划。\n\n- 状态: `waiting_human`\n- 详情已保存在内部审计日志中。")
 			return w.Queue.SetState(ctx, job.ID, queue.StateWaitingHuman, "needs_plan_revision")
 		}
 		result.PublicReport = appendPublicSection(result.PublicReport, w.publishScreenshotArtifacts(job, ws))
+		if visualConfirmationPending {
+			fingerprint, fingerprintErr := workspacePatchFingerprint(ctx, ws.RepoDir)
+			if fingerprintErr == nil && fingerprint == visualConfirmationFingerprint {
+				result.PublicReport = appendPublicSection(result.PublicReport, lastVisualReport)
+				break
+			}
+			visualConfirmationPending = false
+			visualConfirmationFingerprint = ""
+			lastVisualReport = ""
+		}
 		if err := w.Queue.SetState(ctx, job.ID, queue.StateTesting, ""); err != nil {
 			return err
 		}
 		tests, testErr := w.Runner.RunTests(ctx, ws.RepoDir, repo.TestCommands, func() { _ = w.Queue.TouchActivity(ctx, job.ID) })
-		if testErr == nil && tests.Passed {
+		if testErr != nil || !tests.Passed {
+			report := appendPublicSection(result.PublicReport, tests.Output)
+			report = w.implementationAttemptReport(ctx, repo, job, ws, report)
+			if repairAttempts >= maxRepairAttempts {
+				reason := "auto_repair_budget_exhausted"
+				if testErr != nil {
+					reason = appendInternalError(testErr.Error(), reason)
+				}
+				return w.requestImplementationPlanRevision(ctx, job, report, reason)
+			}
+			repairAttempts++
+			prompt = repairPrompt(prepared.Text, repairAttempts, maxRepairAttempts, "Gateway verification did not pass.", report)
+			imageFiles = mergeImageFiles(prepared.ImageFiles, publicScreenshotImageFiles(ws))
+			continue
+		}
+		if len(repo.VisualReviewCommands) == 0 {
 			break
 		}
-		report := appendPublicSection(result.PublicReport, tests.Output)
-		report = w.implementationAttemptReport(ctx, repo, job, ws, report)
-		if repairAttempts >= maxRepairAttempts {
-			reason := "auto_repair_budget_exhausted"
-			if testErr != nil {
-				reason = appendInternalError(testErr.Error(), reason)
-			}
-			return w.requestImplementationPlanRevision(ctx, job, report, reason)
+		if visualAttempts >= maxVisualAttempts {
+			report := appendPublicSection(result.PublicReport, "Gateway visual review:\n- Visual review budget was exhausted before Codex confirmed the latest screenshots.")
+			return w.requestImplementationPlanRevision(ctx, job, report, "visual_review_budget_exhausted")
 		}
-		repairAttempts++
-		prompt = repairPrompt(prepared.Text, repairAttempts, maxRepairAttempts, "Gateway verification did not pass.", report)
-		imageFiles = mergeImageFiles(prepared.ImageFiles, publicScreenshotImageFiles(ws))
+		visual, visualErr := w.runVisualReview(ctx, repo, job, ws)
+		if visualErr != nil {
+			_ = w.Queue.SetState(ctx, job.ID, queue.StateFailed, visualErr.Error())
+			return visualErr
+		}
+		report := appendPublicSection(result.PublicReport, visual.Report)
+		visualAttempts++
+		if !visual.Passed {
+			if repairAttempts >= maxRepairAttempts {
+				return w.requestImplementationPlanRevision(ctx, job, report, visual.LastError)
+			}
+			repairAttempts++
+			prompt = repairPrompt(prepared.Text, repairAttempts, maxRepairAttempts, "Gateway visual review did not pass.", report)
+			imageFiles = mergeImageFiles(prepared.ImageFiles, visual.ImageFiles)
+			continue
+		}
+		if fingerprint, fingerprintErr := workspacePatchFingerprint(ctx, ws.RepoDir); fingerprintErr == nil {
+			visualConfirmationPending = true
+			visualConfirmationFingerprint = fingerprint
+		}
+		lastVisualReport = visual.Report
+		prompt = visualReviewPrompt(prepared.Text, visualAttempts, maxVisualAttempts, report)
+		imageFiles = mergeImageFiles(prepared.ImageFiles, visual.ImageFiles)
 	}
 	result.PublicReport = appendPublicSection(result.PublicReport, w.publishScreenshotArtifacts(job, ws))
 	result.PublicReport = appendPublicSection(result.PublicReport, autoRepairSummary(repairAttempts))
+	result.PublicReport = appendPublicSection(result.PublicReport, visualReviewSummary(visualAttempts))
 	result.PublicReport = appendGatewayVerification(result.PublicReport, repo.TestCommands)
 	files, err := w.changedFiles(ctx, ws.RepoDir, job.BaseBranch)
 	if err != nil {
@@ -725,8 +797,10 @@ func executionConstraints(repo config.RepoConfig) string {
 		"- Do not ask the user questions; make conservative assumptions from the issue context and repository.",
 		"- Do not wait for manual approval or interactive input.",
 		"- Do not include secrets, tokens, credentials, or internal absolute local paths in the final response.",
+		"- Do not start preview servers or browser automation inside the Codex sandbox; use focused non-browser tests for local TDD.",
 		"- Do not run dependency installation commands such as `npm install`, `npm ci`, `yarn install`, `pnpm install`, `pip install`, `bundle install`, or external package fetches unless the issue explicitly requires dependency changes.",
 		"- If verification needs dependencies, use the workspace as prepared by the gateway and the configured verification commands below.",
+		"- Gateway will run browser visual review outside Codex and attach screenshots as image inputs when needed.",
 	}
 	if len(repo.AgentSetupCommands) > 0 {
 		lines = append(lines, "", "Gateway has already run these workspace setup commands before Codex starts:")
@@ -735,6 +809,10 @@ func executionConstraints(repo config.RepoConfig) string {
 	if len(repo.TestCommands) > 0 {
 		lines = append(lines, "", "Configured verification commands:")
 		lines = appendCommandLines(lines, repo.TestCommands)
+	}
+	if len(repo.VisualReviewCommands) > 0 {
+		lines = append(lines, "", "Gateway will run these visual review commands outside Codex when needed:")
+		lines = appendCommandLines(lines, repo.VisualReviewCommands)
 	}
 	return strings.Join(lines, "\n")
 }

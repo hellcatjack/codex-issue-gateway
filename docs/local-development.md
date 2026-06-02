@@ -71,8 +71,11 @@ Set `worker.enabled: true` only when the host is ready to execute local Codex jo
 - optionally preinstalls Playwright browsers into the configured worker cache
 - runs Codex non-interactively
 - runs `test_commands`
+- runs `visual_review_commands` outside Codex and attaches safe screenshots back to Codex when configured
 - opens a PR only when committed changes exist
 
 For Node projects, prefer putting the intended runtime at the front of `PATH` in `test_commands`; npm and test runner shims often use `/usr/bin/env node`.
 
 For Playwright projects, enable `worker.playwright` and keep `node_modules` restoration in `agent_setup_commands`. The worker injects `PLAYWRIGHT_BROWSERS_PATH` into Codex and verification commands, then runs `node node_modules/@playwright/test/cli.js install chromium` after dependencies are present.
+
+Use `test_commands` for non-browser checks such as unit tests, builds, and `git diff --check`. Use `visual_review_commands` for Playwright screenshot checks. Codex can run focused unit tests inside its sandbox for TDD, but browser screenshot review runs outside Codex and is fed back as image inputs.

@@ -17,6 +17,7 @@ worker:
   enabled: true
   codex_binary: "codex"
   job_root: "/tmp/codex-issue-gateway/jobs"
+  visual_review_attempts: 3
   playwright:
     enabled: true
     browsers_path: "/var/cache/codex-issue-gateway/ms-playwright"
@@ -53,6 +54,8 @@ repos:
       - "go test ./..."
       - "npm --prefix web run build"
       - "git diff --check"
+    visual_review_commands:
+      - "npm --prefix web run visual-review"
     deny_paths:
       - ".env"
       - ".env.*"

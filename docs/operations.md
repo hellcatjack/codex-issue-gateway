@@ -32,6 +32,7 @@ Example:
 worker:
   enabled: true
   job_root: "/tmp/codex-issue-gateway/jobs"
+  visual_review_attempts: 3
   playwright:
     enabled: true
     browsers_path: "/var/cache/codex-issue-gateway/ms-playwright"
@@ -40,6 +41,8 @@ worker:
 ```
 
 If `browsers_path`, `node_binary`, or `browsers` are omitted, they default to `<job_root>/_playwright-browsers`, `node`, and `["chromium"]`.
+
+Set `worker.visual_review_attempts` to control how many screenshot feedback cycles an implementation job may use. The default is `3`.
 
 ## GitHub App
 
@@ -75,6 +78,7 @@ Important fields:
 - `allowed_actors`: explicit actor policy.
 - `agent_setup_commands`: optional commands run before Codex starts.
 - `test_commands`: commands the gateway runs after Codex completes.
+- `visual_review_commands`: optional browser-visible verification commands run outside Codex after `test_commands` pass. They must write screenshots under `.codex-gateway-artifacts/screenshots/` when visual review is required.
 - `deny_paths`: paths that cannot be changed by an automated job.
 - `review_required_paths`: paths that can be flagged for extra review.
 - `codex.auth_source_dir`: optional source for copying only `auth.json` into per-job `CODEX_HOME`.
@@ -82,6 +86,8 @@ Important fields:
 `agent_setup_commands` should be used for local dependency caches and SDK setup. They run before Codex and help keep Codex from trying to install dependencies interactively or through blocked external networks.
 
 For Node repositories that use Playwright, keep dependency restoration in `agent_setup_commands` so `node_modules` exists before the worker checks for the Playwright CLI. Browser binaries should be managed through `worker.playwright`, not through Codex prompts.
+
+Keep browser screenshot checks in `visual_review_commands`, not in Codex prompts. Codex can run focused non-browser tests inside its sandbox for TDD, but the worker owns preview servers and Playwright browser execution outside the sandbox. After visual review, the worker attaches the latest safe screenshots back to Codex as image inputs so Codex can adjust the implementation before final PR creation.
 
 ## Issue Workflow
 
@@ -112,15 +118,20 @@ For each job, the worker:
 7. Runs Codex with non-interactive execution rules.
 8. Publishes safe screenshot artifacts when Codex creates them.
 9. Runs configured gateway tests.
-10. Publishes safe screenshot artifacts created by gateway test commands.
-11. Evaluates changed files against deny and review policy.
-12. Commits and pushes changes when files changed.
-13. Creates a Pull Request.
-14. Completes without a PR when no files changed.
+10. Runs configured visual review commands when present.
+11. Publishes safe screenshot artifacts created by visual review commands.
+12. Re-enters Codex with the latest screenshots attached as image inputs.
+13. Repeats tests and visual review when Codex changes files after inspecting screenshots.
+14. Evaluates changed files against deny and review policy.
+15. Commits and pushes changes when files changed.
+16. Creates a Pull Request.
+17. Completes without a PR when no files changed.
 
 No-change completion is intentional. It prevents empty PRs when the current base branch already satisfies the issue.
 
-Implementation jobs self-repair inside the same workspace. When Codex exits early or a configured verification command fails, the gateway does not immediately publish an implementation failure. It builds a sanitized repair prompt from the prior attempt, keeps a broad safe excerpt of verification output, tells Codex to inspect local failure artifacts such as `test-results/`, `playwright-report/`, and `.codex-gateway-artifacts/screenshots/`, attaches any safe screenshot artifacts already published for the job, reruns Codex, and verifies again. This repeats up to `worker.implementation_repair_attempts` times, which defaults to `8`. If the repair budget is exhausted, the job moves to `waiting_human` with a plan-revision request instead of a failed implementation result.
+Implementation jobs self-repair inside the same workspace. When Codex exits early or a configured verification command fails, the gateway does not immediately publish an implementation failure. It builds a sanitized repair prompt from the prior attempt, keeps a broad safe excerpt of verification output, tells Codex to inspect local failure artifacts such as `test-results/`, `playwright-report/`, and `.codex-gateway-artifacts/screenshots/`, attaches any safe screenshot artifacts already published for the job, reruns Codex, and verifies again. This repeats up to `worker.implementation_repair_attempts` times, which defaults to `8`.
+
+Visual review is a separate feedback loop. When `visual_review_commands` are configured, the worker runs those commands outside the Codex sandbox after normal tests pass, publishes safe screenshots, and invokes Codex again with those screenshots attached. Codex must inspect the images and either confirm completion without changing files or update the workspace and return a final response. If Codex changes files after seeing screenshots, the worker reruns tests and visual review. If the visual review budget is exhausted, the job moves to `waiting_human` with a plan-revision request.
 
 ## Public Feedback Safety
 

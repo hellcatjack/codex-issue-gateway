@@ -35,6 +35,7 @@ Commands are recognized only on standalone `/codex ...` lines. In the current bu
 - Execution commands are non-interactive and never wait for user input.
 - Worker subprocesses run with an allowlisted environment instead of inheriting host secrets.
 - Playwright browser caches can be configured at worker level and injected as `PLAYWRIGHT_BROWSERS_PATH` without exposing broader host environment variables.
+- Browser visual review runs outside the Codex sandbox, then safe screenshots are attached back to Codex as image inputs before final PR creation.
 - Worker expiry is based on no activity, not normal elapsed job duration.
 - Jobs run in isolated directories with per-job `CODEX_HOME`; when configured, only `auth.json` is copied from the Codex auth source directory.
 - Repository policies define allowed actors, branches, tests, deny paths, and review-required paths.
@@ -48,6 +49,8 @@ Production worker execution requires a configured GitHub App private key and ins
 If Codex verifies that the requested behavior already exists and no files changed, the job completes successfully without creating an empty PR.
 
 When `worker.playwright.enabled` is true, the worker injects `PLAYWRIGHT_BROWSERS_PATH` into Codex, setup, and test commands, then preinstalls configured browsers after project dependencies are restored.
+
+When repo `visual_review_commands` are configured, the worker runs browser screenshot checks outside Codex after normal tests pass. The latest safe screenshots are then sent back to Codex for visual inspection and further code adjustment before the job can finish.
 
 ## Documentation
 

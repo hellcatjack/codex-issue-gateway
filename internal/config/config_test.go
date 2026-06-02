@@ -54,11 +54,40 @@ func TestLoadBuildsRepoIndexAndDefaults(t *testing.T) {
 	if cfg.Worker.NoActivityTimeoutMinutes != 45 {
 		t.Fatalf("no activity timeout = %d", cfg.Worker.NoActivityTimeoutMinutes)
 	}
+	if cfg.Worker.VisualReviewAttempts != 3 {
+		t.Fatalf("visual review attempts = %d", cfg.Worker.VisualReviewAttempts)
+	}
 	if cfg.Server.PublicBaseURL != "https://gateway.example.test" {
 		t.Fatalf("public base url = %q", cfg.Server.PublicBaseURL)
 	}
 	if len(repo.AgentSetupCommands) != 1 || repo.AgentSetupCommands[0] != "test -d node_modules || cp -a /cache/node_modules ./node_modules" {
 		t.Fatalf("agent setup commands = %#v", repo.AgentSetupCommands)
+	}
+}
+
+func TestLoadParsesRepoVisualReviewCommands(t *testing.T) {
+	yml := strings.Replace(validConfigYAML(), "queue:\n  dsn: \"/tmp/gateway.db\"\n", `queue:
+  dsn: "/tmp/gateway.db"
+worker:
+  visual_review_attempts: 5
+`, 1)
+	yml = strings.Replace(yml, "    test_commands: [\"go test ./...\"]\n", `    test_commands: ["go test ./..."]
+    visual_review_commands:
+      - "npm run visual-review"
+`, 1)
+	cfg, err := Load(strings.NewReader(yml))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Worker.VisualReviewAttempts != 5 {
+		t.Fatalf("visual review attempts = %d", cfg.Worker.VisualReviewAttempts)
+	}
+	repo, ok := cfg.Repo("funland/foliospace-Library")
+	if !ok {
+		t.Fatalf("expected sample repo to be indexed")
+	}
+	if !slices.Equal(repo.VisualReviewCommands, []string{"npm run visual-review"}) {
+		t.Fatalf("visual review commands = %#v", repo.VisualReviewCommands)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -89,6 +90,118 @@ func TestWorkerCreatesPRAfterTestsAndDiffPass(t *testing.T) {
 	}
 	if deps.GitHub.PullRequests[0].Head != "hellcatjack:codex/issue-2-delivery-implement" {
 		t.Fatalf("pr head = %q", deps.GitHub.PullRequests[0].Head)
+	}
+}
+
+func TestWorkerFeedsVisualReviewScreenshotsBackToCodexBeforePR(t *testing.T) {
+	deps := newWorkerTestDeps(t)
+	deps.Worker.Config = &config.Config{
+		Server: config.ServerConfig{PublicBaseURL: "https://gateway.example.test"},
+		Worker: config.WorkerConfig{
+			ImplementationRepairAttempts: 4,
+			VisualReviewAttempts:         3,
+		},
+	}
+	deps.Worker.Repo.VisualReviewCommands = []string{"capture latest reader screenshots"}
+	job := deps.createQueuedJob(t, "implement")
+	deps.seedIssueContext(job, "/codex implement")
+	deps.Runner.CodexResults = []CodexResult{
+		{
+			Status:       "completed",
+			PublicReport: "Summary:\n- Adjusted the TTS note width.",
+		},
+		{
+			Status:       "completed",
+			PublicReport: "Summary:\n- Reviewed the attached screenshot and no further changes were needed.",
+		},
+	}
+	deps.Runner.TestResults = []TestResult{
+		{Passed: true},
+		{Passed: true},
+	}
+	deps.Runner.TestBinaryFilesByCall = []map[string][]byte{
+		nil,
+		{".codex-gateway-artifacts/screenshots/latest.png": tinyPNG()},
+	}
+	deps.Diff.Files = []string{"src/features/reader/ReaderPage.tsx"}
+
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if deps.Runner.CodexCalls != 2 {
+		t.Fatalf("codex calls = %d", deps.Runner.CodexCalls)
+	}
+	if len(deps.Runner.TestCommandCalls) != 2 {
+		t.Fatalf("test command calls = %#v", deps.Runner.TestCommandCalls)
+	}
+	if got := deps.Runner.TestCommandCalls[0]; !slices.Equal(got, deps.Worker.Repo.TestCommands) {
+		t.Fatalf("gateway test commands = %#v", got)
+	}
+	if got := deps.Runner.TestCommandCalls[1]; !slices.Equal(got, deps.Worker.Repo.VisualReviewCommands) {
+		t.Fatalf("visual review commands = %#v", got)
+	}
+	if len(deps.Runner.CodexInputs) < 2 {
+		t.Fatalf("codex inputs = %#v", deps.Runner.CodexInputs)
+	}
+	second := deps.Runner.CodexInputs[1]
+	if len(second.ImageFiles) != 1 || filepath.Base(second.ImageFiles[0]) != "latest.png" {
+		t.Fatalf("visual review image files = %#v", second.ImageFiles)
+	}
+	for _, want := range []string{"Inspect the latest gateway visual review screenshots", "Do not start preview servers or browser automation"} {
+		if !strings.Contains(second.Prompt, want) {
+			t.Fatalf("visual review prompt missing %q: %s", want, second.Prompt)
+		}
+	}
+	if len(deps.GitHub.PullRequests) != 1 {
+		t.Fatalf("pull requests = %#v", deps.GitHub.PullRequests)
+	}
+	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
+	if !strings.Contains(body, "Visual artifacts:") || !strings.Contains(body, "latest.png") {
+		t.Fatalf("implementation comment missing latest visual artifact: %s", body)
+	}
+}
+
+func TestWorkerRepairsWhenVisualReviewPassesWithoutScreenshots(t *testing.T) {
+	deps := newWorkerTestDeps(t)
+	deps.Worker.Config = &config.Config{Worker: config.WorkerConfig{
+		ImplementationRepairAttempts: 1,
+		VisualReviewAttempts:         2,
+	}}
+	deps.Worker.Repo.VisualReviewCommands = []string{"capture latest reader screenshots"}
+	job := deps.createQueuedJob(t, "implement")
+	deps.seedIssueContext(job, "/codex implement")
+	deps.Runner.CodexResults = []CodexResult{
+		{Status: "completed", PublicReport: "Summary:\n- Updated the UI."},
+		{Status: "completed", PublicReport: "Summary:\n- Tried to react to missing screenshots."},
+	}
+	deps.Runner.TestResults = []TestResult{
+		{Passed: true},
+		{Passed: true},
+		{Passed: true},
+		{Passed: true},
+	}
+	deps.Diff.Files = []string{"src/features/reader/ReaderPage.tsx"}
+
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := deps.Queue.GetJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != queue.StateWaitingHuman || !strings.Contains(got.LastError, "visual_review_missing_screenshots") {
+		t.Fatalf("job=%#v", got)
+	}
+	if deps.Runner.CodexCalls != 2 {
+		t.Fatalf("codex calls = %d", deps.Runner.CodexCalls)
+	}
+	if len(deps.GitHub.PullRequests) != 0 {
+		t.Fatalf("pull requests = %#v", deps.GitHub.PullRequests)
+	}
+	if len(deps.Runner.CodexInputs) < 2 || !strings.Contains(deps.Runner.CodexInputs[1].Prompt, "did not produce any safe screenshots") {
+		t.Fatalf("repair prompt missing screenshot diagnostic: %#v", deps.Runner.CodexInputs)
 	}
 }
 
@@ -356,6 +469,7 @@ func TestWorkerPromptIncludesExecutionConstraints(t *testing.T) {
 	deps := newWorkerTestDeps(t)
 	deps.Worker.Repo.AgentSetupCommands = []string{"test -d node_modules || cp -a /cache/node_modules ./node_modules"}
 	deps.Worker.Repo.TestCommands = []string{"npm run test", "git diff --check"}
+	deps.Worker.Repo.VisualReviewCommands = []string{"npm run visual-review"}
 	deps.Runner.CommandResult = CommandResult{Passed: true}
 	deps.Runner.CodexResult = CodexResult{Status: "completed"}
 	deps.Runner.TestResult = TestResult{Passed: true}
@@ -371,11 +485,14 @@ func TestWorkerPromptIncludesExecutionConstraints(t *testing.T) {
 	for _, want := range []string{
 		"Do not ask the user questions",
 		"Do not include secrets, tokens, credentials, or internal absolute local paths",
+		"Do not start preview servers or browser automation inside the Codex sandbox",
 		"Do not run dependency installation commands",
 		"Gateway has already run these workspace setup commands before Codex starts:",
 		"Configured verification commands:",
 		"`npm run test`",
 		"`git diff --check`",
+		"Gateway will run these visual review commands outside Codex when needed:",
+		"`npm run visual-review`",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q: %s", want, prompt)
@@ -861,23 +978,25 @@ type workerTestDeps struct {
 }
 
 type fakeRunner struct {
-	CodexResult     CodexResult
-	CodexResults    []CodexResult
-	CommandResult   CommandResult
-	TestResult      TestResult
-	TestResults     []TestResult
-	LastInput       CodexInput
-	CodexInputs     []CodexInput
-	CommandCalls    [][]string
-	CommandFiles    map[string]string
-	CodexCalls      int
-	TestCalls       int
-	Files           map[string]string
-	BinaryFiles     map[string][]byte
-	TestBinaryFiles map[string][]byte
-	Symlinks        map[string]string
-	Err             error
-	Errs            []error
+	CodexResult           CodexResult
+	CodexResults          []CodexResult
+	CommandResult         CommandResult
+	TestResult            TestResult
+	TestResults           []TestResult
+	LastInput             CodexInput
+	CodexInputs           []CodexInput
+	CommandCalls          [][]string
+	CommandFiles          map[string]string
+	TestCommandCalls      [][]string
+	CodexCalls            int
+	TestCalls             int
+	Files                 map[string]string
+	BinaryFiles           map[string][]byte
+	TestBinaryFiles       map[string][]byte
+	TestBinaryFilesByCall []map[string][]byte
+	Symlinks              map[string]string
+	Err                   error
+	Errs                  []error
 }
 
 func (r *fakeRunner) RunCodex(ctx context.Context, input CodexInput, onActivity func()) (CodexResult, error) {
@@ -946,9 +1065,11 @@ func (r *fakeRunner) RunCommands(ctx context.Context, repoDir string, commands [
 
 func (r *fakeRunner) RunTests(ctx context.Context, repoDir string, commands []string, onActivity func()) (TestResult, error) {
 	r.TestCalls++
+	callIndex := r.TestCalls - 1
 	if onActivity != nil {
 		onActivity()
 	}
+	r.TestCommandCalls = append(r.TestCommandCalls, append([]string(nil), commands...))
 	for name, body := range r.TestBinaryFiles {
 		path := filepath.Join(repoDir, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -958,7 +1079,17 @@ func (r *fakeRunner) RunTests(ctx context.Context, repoDir string, commands []st
 			return TestResult{}, err
 		}
 	}
-	callIndex := r.TestCalls - 1
+	if callIndex < len(r.TestBinaryFilesByCall) {
+		for name, body := range r.TestBinaryFilesByCall[callIndex] {
+			path := filepath.Join(repoDir, filepath.FromSlash(name))
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return TestResult{}, err
+			}
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				return TestResult{}, err
+			}
+		}
+	}
 	if callIndex < len(r.TestResults) {
 		return r.TestResults[callIndex], nil
 	}
