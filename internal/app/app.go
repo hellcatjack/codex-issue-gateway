@@ -81,7 +81,7 @@ func buildWorker(runtime *Runtime) *worker.Worker {
 	return &worker.Worker{
 		Queue:   runtime.Queue,
 		GitHub:  runtime.GitHub,
-		Runner:  worker.LocalRunner{CodexBinary: runtime.Config.Worker.CodexBinary},
+		Runner:  worker.LocalRunner{CodexBinary: runtime.Config.Worker.CodexBinary, Environment: worker.EnvironmentForConfig(runtime.Config)},
 		Diff:    worker.GitDiffScanner{},
 		JobRoot: runtime.Config.Worker.JobRoot,
 		Config:  runtime.Config,

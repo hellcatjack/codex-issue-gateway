@@ -18,6 +18,29 @@ GitHub Issue or Issue Comment
 
 The gateway and worker are in one binary. The HTTP server can accept and queue work without a worker, but real development execution requires `worker.enabled: true`.
 
+## Worker Configuration
+
+Set `worker.playwright.enabled: true` on hosts that should support browser verification. When enabled, the worker:
+
+- injects `PLAYWRIGHT_BROWSERS_PATH` into Codex, setup commands, and test commands
+- runs Playwright browser installation after `agent_setup_commands` when `node_modules/@playwright/test/cli.js` or `node_modules/playwright/cli.js` exists in the prepared workspace
+- skips browser installation for repositories that do not contain a Playwright CLI
+
+Example:
+
+```yaml
+worker:
+  enabled: true
+  job_root: "/tmp/codex-issue-gateway/jobs"
+  playwright:
+    enabled: true
+    browsers_path: "/var/cache/codex-issue-gateway/ms-playwright"
+    node_binary: "/usr/bin/node"
+    browsers: ["chromium"]
+```
+
+If `browsers_path`, `node_binary`, or `browsers` are omitted, they default to `<job_root>/_playwright-browsers`, `node`, and `["chromium"]`.
+
 ## GitHub App
 
 Create a GitHub App with these repository permissions:
@@ -58,6 +81,8 @@ Important fields:
 
 `agent_setup_commands` should be used for local dependency caches and SDK setup. They run before Codex and help keep Codex from trying to install dependencies interactively or through blocked external networks.
 
+For Node repositories that use Playwright, keep dependency restoration in `agent_setup_commands` so `node_modules` exists before the worker checks for the Playwright CLI. Browser binaries should be managed through `worker.playwright`, not through Codex prompts.
+
 ## Issue Workflow
 
 Only standalone commands are recognized:
@@ -82,15 +107,16 @@ For each job, the worker:
 2. Prepares a per-job `CODEX_HOME`.
 3. Clones or copies the configured repository.
 4. Runs optional `agent_setup_commands`.
-5. Fetches fresh issue context from GitHub.
-6. Runs Codex with non-interactive execution rules.
-7. Publishes safe screenshot artifacts when Codex creates them.
-8. Runs configured gateway tests.
-9. Publishes safe screenshot artifacts created by gateway test commands.
-10. Evaluates changed files against deny and review policy.
-11. Commits and pushes changes when files changed.
-12. Creates a Pull Request.
-13. Completes without a PR when no files changed.
+5. Preinstalls configured Playwright browsers when the prepared workspace has a Playwright CLI.
+6. Fetches fresh issue context from GitHub.
+7. Runs Codex with non-interactive execution rules.
+8. Publishes safe screenshot artifacts when Codex creates them.
+9. Runs configured gateway tests.
+10. Publishes safe screenshot artifacts created by gateway test commands.
+11. Evaluates changed files against deny and review policy.
+12. Commits and pushes changes when files changed.
+13. Creates a Pull Request.
+14. Completes without a PR when no files changed.
 
 No-change completion is intentional. It prevents empty PRs when the current base branch already satisfies the issue.
 

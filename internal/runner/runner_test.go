@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +92,26 @@ func TestProcessRunnerReportsActivityFromOutput(t *testing.T) {
 	}
 	if result.ExitCode != 0 || activity == 0 {
 		t.Fatalf("result=%#v activity=%d", result, activity)
+	}
+}
+
+func TestRunTestCommandsUsesExtraEnv(t *testing.T) {
+	dir := t.TempDir()
+	result, err := RunTestCommandsWithEnv(context.Background(), dir, []string{
+		"printf '%s' \"$PLAYWRIGHT_BROWSERS_PATH\" > pw-env.txt",
+	}, map[string]string{"PLAYWRIGHT_BROWSERS_PATH": "/cache/ms-playwright"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Passed {
+		t.Fatalf("result=%#v", result)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "pw-env.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "/cache/ms-playwright" {
+		t.Fatalf("env file = %q", string(got))
 	}
 }
 

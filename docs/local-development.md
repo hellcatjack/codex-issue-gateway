@@ -5,6 +5,7 @@
 - Go toolchain for the module in `go.mod`.
 - GitHub CLI when testing real issue comments or pull requests.
 - A local Codex CLI when `worker.enabled` is true.
+- A local Node runtime when `worker.playwright.enabled` is true.
 - A GitHub App private key and webhook secret for real GitHub execution.
 - Local fixture repositories for integration tests, when enabled.
 
@@ -67,8 +68,11 @@ Set `worker.enabled: true` only when the host is ready to execute local Codex jo
 - clones or copies the configured repository into an isolated job directory
 - prepares a per-job `CODEX_HOME`
 - optionally runs `agent_setup_commands`
+- optionally preinstalls Playwright browsers into the configured worker cache
 - runs Codex non-interactively
 - runs `test_commands`
 - opens a PR only when committed changes exist
 
 For Node projects, prefer putting the intended runtime at the front of `PATH` in `test_commands`; npm and test runner shims often use `/usr/bin/env node`.
+
+For Playwright projects, enable `worker.playwright` and keep `node_modules` restoration in `agent_setup_commands`. The worker injects `PLAYWRIGHT_BROWSERS_PATH` into Codex and verification commands, then runs `node node_modules/@playwright/test/cli.js install chromium` after dependencies are present.

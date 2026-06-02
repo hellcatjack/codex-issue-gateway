@@ -14,6 +14,7 @@ import (
 
 type LocalRunner struct {
 	CodexBinary string
+	Environment map[string]string
 }
 
 const (
@@ -35,7 +36,7 @@ func (r LocalRunner) RunCodex(ctx context.Context, input CodexInput, onActivity 
 		Name:  spec.Name,
 		Args:  spec.Args,
 		Dir:   spec.Dir,
-		Env:   spec.Env,
+		Env:   mergeEnvironment(r.Environment, spec.Env),
 		Stdin: spec.Stdin,
 		OnActivity: func(runner.Activity) {
 			if onActivity != nil {
@@ -124,7 +125,7 @@ func safeProcessOutputExcerpt(output string) string {
 }
 
 func (r LocalRunner) RunTests(ctx context.Context, repoDir string, commands []string, onActivity func()) (TestResult, error) {
-	result, err := runner.RunTestCommands(ctx, repoDir, commands, func(runner.Activity) {
+	result, err := runner.RunTestCommandsWithEnv(ctx, repoDir, commands, r.Environment, func(runner.Activity) {
 		if onActivity != nil {
 			onActivity()
 		}
@@ -133,12 +134,26 @@ func (r LocalRunner) RunTests(ctx context.Context, repoDir string, commands []st
 }
 
 func (r LocalRunner) RunCommands(ctx context.Context, repoDir string, commands []string, onActivity func()) (CommandResult, error) {
-	result, err := runner.RunTestCommands(ctx, repoDir, commands, func(runner.Activity) {
+	result, err := runner.RunTestCommandsWithEnv(ctx, repoDir, commands, r.Environment, func(runner.Activity) {
 		if onActivity != nil {
 			onActivity()
 		}
 	})
 	return CommandResult{Passed: result.Passed, Output: publicCommandReport(commands, result)}, err
+}
+
+func mergeEnvironment(base, extra map[string]string) map[string]string {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(extra))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	return merged
 }
 
 func publicCommandReport(commands []string, result runner.TestCommandsResult) string {

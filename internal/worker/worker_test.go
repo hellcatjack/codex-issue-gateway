@@ -233,6 +233,58 @@ func TestWorkerRunsAgentSetupBeforeCodex(t *testing.T) {
 	}
 }
 
+func TestWorkerPreinstallsPlaywrightBrowsersAfterSetup(t *testing.T) {
+	deps := newWorkerTestDeps(t)
+	deps.Worker.Repo.AgentSetupCommands = []string{"prepare local dependencies"}
+	deps.Worker.Config = &config.Config{Worker: config.WorkerConfig{
+		Playwright: config.PlaywrightConfig{
+			Enabled:      true,
+			BrowsersPath: "/cache/ms-playwright",
+			NodeBinary:   "/opt/node/bin/node",
+			Browsers:     []string{"chromium"},
+		},
+	}}
+	deps.Runner.CommandResult = CommandResult{Passed: true}
+	deps.Runner.CommandFiles = map[string]string{
+		"node_modules/@playwright/test/cli.js": "#!/usr/bin/env node\n",
+	}
+	deps.Runner.CodexResult = CodexResult{Status: "completed", Summary: "Changed README"}
+	deps.Runner.TestResult = TestResult{Passed: true}
+	deps.Diff.Files = []string{"README.md"}
+	job := deps.createQueuedJob(t, "implement")
+	deps.seedIssueContext(job, "/codex implement")
+
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(deps.Runner.CommandCalls) != 2 {
+		t.Fatalf("command calls = %#v", deps.Runner.CommandCalls)
+	}
+	if got := deps.Runner.CommandCalls[0]; len(got) != 1 || got[0] != "prepare local dependencies" {
+		t.Fatalf("setup commands = %#v", got)
+	}
+	installCommands := deps.Runner.CommandCalls[1]
+	if len(installCommands) != 1 {
+		t.Fatalf("install commands = %#v", installCommands)
+	}
+	install := installCommands[0]
+	for _, want := range []string{
+		"PLAYWRIGHT_BROWSERS_PATH='/cache/ms-playwright'",
+		"'/opt/node/bin/node'",
+		"'node_modules/@playwright/test/cli.js'",
+		" install ",
+		"'chromium'",
+	} {
+		if !strings.Contains(install, want) {
+			t.Fatalf("playwright install command missing %q: %s", want, install)
+		}
+	}
+	if deps.Runner.CodexCalls != 1 {
+		t.Fatalf("codex calls = %d", deps.Runner.CodexCalls)
+	}
+}
+
 func TestWorkerStopsBeforeCodexWhenAgentSetupFails(t *testing.T) {
 	deps := newWorkerTestDeps(t)
 	deps.Worker.Repo.AgentSetupCommands = []string{"prepare local dependencies"}
@@ -817,6 +869,7 @@ type fakeRunner struct {
 	LastInput       CodexInput
 	CodexInputs     []CodexInput
 	CommandCalls    [][]string
+	CommandFiles    map[string]string
 	CodexCalls      int
 	TestCalls       int
 	Files           map[string]string
@@ -877,6 +930,15 @@ func (r *fakeRunner) RunCodex(ctx context.Context, input CodexInput, onActivity 
 func (r *fakeRunner) RunCommands(ctx context.Context, repoDir string, commands []string, onActivity func()) (CommandResult, error) {
 	if onActivity != nil {
 		onActivity()
+	}
+	for name, body := range r.CommandFiles {
+		path := filepath.Join(repoDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return CommandResult{}, err
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			return CommandResult{}, err
+		}
 	}
 	r.CommandCalls = append(r.CommandCalls, append([]string(nil), commands...))
 	return r.CommandResult, nil

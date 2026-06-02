@@ -29,6 +29,60 @@ func TestLocalRunnerRunsTestCommands(t *testing.T) {
 	}
 }
 
+func TestLocalRunnerPassesEnvironmentToTestCommands(t *testing.T) {
+	dir := t.TempDir()
+	runner := LocalRunner{Environment: map[string]string{"PLAYWRIGHT_BROWSERS_PATH": "/cache/ms-playwright"}}
+
+	result, err := runner.RunTests(context.Background(), dir, []string{
+		"printf '%s' \"$PLAYWRIGHT_BROWSERS_PATH\" > pw-env.txt",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Passed {
+		t.Fatalf("result=%#v", result)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "pw-env.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "/cache/ms-playwright" {
+		t.Fatalf("env file = %q", string(got))
+	}
+}
+
+func TestLocalRunnerPassesEnvironmentToCodex(t *testing.T) {
+	dir := t.TempDir()
+	codexHome := t.TempDir()
+	codex := filepath.Join(t.TempDir(), "codex")
+	script := `#!/bin/sh
+printf '%s' "$PLAYWRIGHT_BROWSERS_PATH" > pw-env.txt
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"status: completed"}}'
+`
+	if err := os.WriteFile(codex, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (LocalRunner{
+		CodexBinary: codex,
+		Environment: map[string]string{"PLAYWRIGHT_BROWSERS_PATH": "/cache/ms-playwright"},
+	}).RunCodex(context.Background(), CodexInput{
+		Repo:      config.RepoConfig{},
+		Workspace: sandbox.Workspace{RepoDir: dir, CodexHome: codexHome},
+		Prompt:    "test prompt",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "pw-env.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "/cache/ms-playwright" {
+		t.Fatalf("env file = %q", string(got))
+	}
+}
+
 func TestLocalRunnerReturnsPublicReportWhenCodexExitsNonZero(t *testing.T) {
 	dir := t.TempDir()
 	codexHome := t.TempDir()

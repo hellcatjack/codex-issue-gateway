@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -37,14 +39,22 @@ type QueueConfig struct {
 }
 
 type WorkerConfig struct {
-	Enabled                      bool           `yaml:"enabled"`
-	CodexBinary                  string         `yaml:"codex_binary"`
-	JobRoot                      string         `yaml:"job_root"`
-	StaleLeaseAfterMinutes       int            `yaml:"stale_lease_after_minutes"`
-	NoActivityTimeoutMinutes     int            `yaml:"no_activity_timeout_minutes"`
-	PhaseNoActivityTimeouts      map[string]int `yaml:"phase_no_activity_timeout_minutes"`
-	AbsoluteJobTimeoutMinutes    int            `yaml:"absolute_job_timeout_minutes"`
-	ImplementationRepairAttempts int            `yaml:"implementation_repair_attempts"`
+	Enabled                      bool             `yaml:"enabled"`
+	CodexBinary                  string           `yaml:"codex_binary"`
+	JobRoot                      string           `yaml:"job_root"`
+	Playwright                   PlaywrightConfig `yaml:"playwright"`
+	StaleLeaseAfterMinutes       int              `yaml:"stale_lease_after_minutes"`
+	NoActivityTimeoutMinutes     int              `yaml:"no_activity_timeout_minutes"`
+	PhaseNoActivityTimeouts      map[string]int   `yaml:"phase_no_activity_timeout_minutes"`
+	AbsoluteJobTimeoutMinutes    int              `yaml:"absolute_job_timeout_minutes"`
+	ImplementationRepairAttempts int              `yaml:"implementation_repair_attempts"`
+}
+
+type PlaywrightConfig struct {
+	Enabled      bool     `yaml:"enabled"`
+	BrowsersPath string   `yaml:"browsers_path"`
+	NodeBinary   string   `yaml:"node_binary"`
+	Browsers     []string `yaml:"browsers"`
 }
 
 type RepoConfig struct {
@@ -121,6 +131,17 @@ func (c *Config) applyDefaults() {
 	if c.Worker.JobRoot == "" {
 		c.Worker.JobRoot = "/tmp/codex-issue-gateway/jobs"
 	}
+	if c.Worker.Playwright.Enabled {
+		if c.Worker.Playwright.BrowsersPath == "" {
+			c.Worker.Playwright.BrowsersPath = filepath.Join(c.Worker.JobRoot, "_playwright-browsers")
+		}
+		if c.Worker.Playwright.NodeBinary == "" {
+			c.Worker.Playwright.NodeBinary = "node"
+		}
+		if len(c.Worker.Playwright.Browsers) == 0 {
+			c.Worker.Playwright.Browsers = []string{"chromium"}
+		}
+	}
 	if c.Worker.NoActivityTimeoutMinutes == 0 {
 		c.Worker.NoActivityTimeoutMinutes = 45
 	}
@@ -163,6 +184,13 @@ func (c *Config) validate() error {
 	}
 	if len(c.Repos) == 0 {
 		return fmt.Errorf("at least one repo is required")
+	}
+	if c.Worker.Playwright.Enabled {
+		for _, browser := range c.Worker.Playwright.Browsers {
+			if strings.TrimSpace(browser) == "" {
+				return fmt.Errorf("worker.playwright.browsers contains an empty browser name")
+			}
+		}
 	}
 	seen := map[string]bool{}
 	for _, repo := range c.Repos {

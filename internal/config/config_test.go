@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -58,6 +59,74 @@ func TestLoadBuildsRepoIndexAndDefaults(t *testing.T) {
 	}
 	if len(repo.AgentSetupCommands) != 1 || repo.AgentSetupCommands[0] != "test -d node_modules || cp -a /cache/node_modules ./node_modules" {
 		t.Fatalf("agent setup commands = %#v", repo.AgentSetupCommands)
+	}
+}
+
+func TestLoadParsesWorkerPlaywrightConfig(t *testing.T) {
+	yml := strings.Replace(validConfigYAML(), "queue:\n  dsn: \"/tmp/gateway.db\"\n", `queue:
+  dsn: "/tmp/gateway.db"
+worker:
+  job_root: "/tmp/gateway/jobs"
+  playwright:
+    enabled: true
+    browsers_path: "/cache/ms-playwright"
+    node_binary: "/opt/node/bin/node"
+    browsers: ["chromium", "firefox"]
+`, 1)
+	cfg, err := Load(strings.NewReader(yml))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	pw := cfg.Worker.Playwright
+	if !pw.Enabled {
+		t.Fatalf("playwright should be enabled")
+	}
+	if pw.BrowsersPath != "/cache/ms-playwright" {
+		t.Fatalf("browsers path = %q", pw.BrowsersPath)
+	}
+	if pw.NodeBinary != "/opt/node/bin/node" {
+		t.Fatalf("node binary = %q", pw.NodeBinary)
+	}
+	if !slices.Equal(pw.Browsers, []string{"chromium", "firefox"}) {
+		t.Fatalf("browsers = %#v", pw.Browsers)
+	}
+}
+
+func TestLoadDefaultsWorkerPlaywrightConfig(t *testing.T) {
+	yml := strings.Replace(validConfigYAML(), "queue:\n  dsn: \"/tmp/gateway.db\"\n", `queue:
+  dsn: "/tmp/gateway.db"
+worker:
+  job_root: "/tmp/gateway/jobs"
+  playwright:
+    enabled: true
+`, 1)
+	cfg, err := Load(strings.NewReader(yml))
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	pw := cfg.Worker.Playwright
+	if pw.BrowsersPath != "/tmp/gateway/jobs/_playwright-browsers" {
+		t.Fatalf("browsers path = %q", pw.BrowsersPath)
+	}
+	if pw.NodeBinary != "node" {
+		t.Fatalf("node binary = %q", pw.NodeBinary)
+	}
+	if !slices.Equal(pw.Browsers, []string{"chromium"}) {
+		t.Fatalf("browsers = %#v", pw.Browsers)
+	}
+}
+
+func TestLoadRejectsEmptyPlaywrightBrowser(t *testing.T) {
+	yml := strings.Replace(validConfigYAML(), "queue:\n  dsn: \"/tmp/gateway.db\"\n", `queue:
+  dsn: "/tmp/gateway.db"
+worker:
+  playwright:
+    enabled: true
+    browsers: [""]
+`, 1)
+	_, err := Load(strings.NewReader(yml))
+	if err == nil || !strings.Contains(err.Error(), "worker.playwright.browsers contains an empty browser name") {
+		t.Fatalf("expected empty browser validation error, got %v", err)
 	}
 }
 

@@ -71,6 +71,38 @@ func TestBuildWorkerUsesConfiguredCodexBinary(t *testing.T) {
 	}
 }
 
+func TestBuildWorkerUsesConfiguredPlaywrightEnvironment(t *testing.T) {
+	tmp := t.TempDir()
+	secretPath := filepath.Join(tmp, "webhook-secret")
+	dbPath := filepath.Join(tmp, "gateway.db")
+	configPath := filepath.Join(tmp, "gateway.yml")
+	if err := os.WriteFile(secretPath, []byte("local-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	yml := strings.ReplaceAll(runtimeConfigYAML(secretPath, dbPath), "worker:\n", `worker:
+  playwright:
+    enabled: true
+    browsers_path: "/cache/ms-playwright"
+`)
+	if err := os.WriteFile(configPath, []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime, cleanup, err := LoadRuntime(context.Background(), configPath)
+	if err != nil {
+		t.Fatalf("LoadRuntime returned error: %v", err)
+	}
+	defer cleanup()
+
+	w := buildWorker(runtime)
+	runner, ok := w.Runner.(worker.LocalRunner)
+	if !ok {
+		t.Fatalf("runner = %T", w.Runner)
+	}
+	if runner.Environment["PLAYWRIGHT_BROWSERS_PATH"] != "/cache/ms-playwright" {
+		t.Fatalf("runner environment = %#v", runner.Environment)
+	}
+}
+
 func runtimeConfigYAML(secretPath, dbPath string) string {
 	yml := `
 server:

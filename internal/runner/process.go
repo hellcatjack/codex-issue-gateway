@@ -95,12 +95,17 @@ func RunProcess(ctx context.Context, input ProcessInput) (ProcessResult, error) 
 }
 
 func RunTestCommands(ctx context.Context, repoDir string, commands []string, onActivity func(Activity)) (TestCommandsResult, error) {
+	return RunTestCommandsWithEnv(ctx, repoDir, commands, nil, onActivity)
+}
+
+func RunTestCommandsWithEnv(ctx context.Context, repoDir string, commands []string, env map[string]string, onActivity func(Activity)) (TestCommandsResult, error) {
 	out := TestCommandsResult{Passed: true}
 	for _, command := range commands {
 		result, err := RunProcess(ctx, ProcessInput{
 			Name:       "sh",
 			Args:       []string{"-c", command},
 			Dir:        repoDir,
+			Env:        env,
 			OnActivity: onActivity,
 		})
 		out.Results = append(out.Results, result)

@@ -17,6 +17,11 @@ worker:
   enabled: true
   codex_binary: "codex"
   job_root: "/tmp/codex-issue-gateway/jobs"
+  playwright:
+    enabled: true
+    browsers_path: "/var/cache/codex-issue-gateway/ms-playwright"
+    node_binary: "/usr/bin/node"
+    browsers: ["chromium"]
   stale_lease_after_minutes: 15
   no_activity_timeout_minutes: 45
   absolute_job_timeout_minutes: 720

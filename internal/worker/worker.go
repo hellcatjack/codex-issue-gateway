@@ -139,20 +139,19 @@ func (w *Worker) RunOne(ctx context.Context) error {
 }
 
 func (w *Worker) prepareAgentWorkspace(ctx context.Context, repo config.RepoConfig, job queue.Job, ws sandbox.Workspace) error {
-	if len(repo.AgentSetupCommands) == 0 {
-		return nil
-	}
-	result, err := w.Runner.RunCommands(ctx, ws.RepoDir, repo.AgentSetupCommands, func() {
-		_ = w.Queue.TouchActivity(ctx, job.ID)
-	})
-	if err != nil || !result.Passed {
-		report := result.Output
-		if err != nil {
-			return w.codexFailure(ctx, repo, job, ws, "setup", report, err)
+	if len(repo.AgentSetupCommands) > 0 {
+		result, err := w.Runner.RunCommands(ctx, ws.RepoDir, repo.AgentSetupCommands, func() {
+			_ = w.Queue.TouchActivity(ctx, job.ID)
+		})
+		if err != nil || !result.Passed {
+			report := result.Output
+			if err != nil {
+				return w.codexFailure(ctx, repo, job, ws, "setup", report, err)
+			}
+			return w.codexFailure(ctx, repo, job, ws, "setup", report, errors.New("setup_failed"))
 		}
-		return w.codexFailure(ctx, repo, job, ws, "setup", report, errors.New("setup_failed"))
 	}
-	return nil
+	return w.preparePlaywrightWorkspace(ctx, repo, job, ws)
 }
 
 func (w *Worker) runPlan(ctx context.Context, repo config.RepoConfig, job queue.Job, ws sandbox.Workspace) error {
