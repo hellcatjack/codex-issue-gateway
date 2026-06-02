@@ -16,6 +16,12 @@ type LocalRunner struct {
 	CodexBinary string
 }
 
+const (
+	safeProcessOutputMaxLines  = 240
+	safeProcessOutputHeadLines = 80
+	safeProcessOutputTailLines = 160
+)
+
 func (r LocalRunner) RunCodex(ctx context.Context, input CodexInput, onActivity func()) (CodexResult, error) {
 	spec := runner.BuildCodexCommand(runner.CodexInput{
 		CodexBinary: r.CodexBinary,
@@ -109,9 +115,9 @@ func safeProcessOutputExcerpt(output string) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	if len(lines) > 12 {
-		head := append([]string(nil), lines[:6]...)
-		tail := lines[len(lines)-6:]
+	if len(lines) > safeProcessOutputMaxLines {
+		head := append([]string(nil), lines[:safeProcessOutputHeadLines]...)
+		tail := lines[len(lines)-safeProcessOutputTailLines:]
 		return strings.Join(append(append(head, "..."), tail...), "\n")
 	}
 	return strings.Join(lines, "\n")

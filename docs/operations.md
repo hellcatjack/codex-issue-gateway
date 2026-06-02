@@ -94,6 +94,8 @@ For each job, the worker:
 
 No-change completion is intentional. It prevents empty PRs when the current base branch already satisfies the issue.
 
+Implementation jobs self-repair inside the same workspace. When Codex exits early or a configured verification command fails, the gateway does not immediately publish an implementation failure. It builds a sanitized repair prompt from the prior attempt, keeps a broad safe excerpt of verification output, tells Codex to inspect local failure artifacts such as `test-results/`, `playwright-report/`, and `.codex-gateway-artifacts/screenshots/`, attaches any safe screenshot artifacts already published for the job, reruns Codex, and verifies again. This repeats up to `worker.implementation_repair_attempts` times, which defaults to `8`. If the repair budget is exhausted, the job moves to `waiting_human` with a plan-revision request instead of a failed implementation result.
+
 ## Public Feedback Safety
 
 Public comments and PR bodies are filtered before publication. The filter removes lines that look like:

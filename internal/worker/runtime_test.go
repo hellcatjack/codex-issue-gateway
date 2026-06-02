@@ -200,6 +200,37 @@ func TestLocalRunnerIncludesTailOfLongFailedTestOutput(t *testing.T) {
 	}
 }
 
+func TestLocalRunnerKeepsBroadSafeFailedTestOutputForRepairContext(t *testing.T) {
+	dir := t.TempDir()
+	runner := LocalRunner{}
+
+	result, err := runner.RunTests(context.Background(), dir, []string{
+		`for i in $(seq 1 160); do
+			if [ "$i" = 90 ]; then
+				printf 'playwright received geometry delta 12.5\n'
+				printf 'unsafe /tmp/private/job.log OPENAI_API_KEY=sk-proj-secret\n'
+			else
+				printf 'diagnostic line %03d\n' "$i"
+			fi
+		done
+		exit 1`,
+	}, nil)
+
+	if err == nil {
+		t.Fatal("expected test command failure")
+	}
+	for _, want := range []string{"diagnostic line 001", "playwright received geometry delta 12.5", "diagnostic line 160"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("test output missing %q: %q", want, result.Output)
+		}
+	}
+	for _, leaked := range []string{"/tmp/private", "OPENAI_API_KEY", "sk-proj-secret"} {
+		if strings.Contains(result.Output, leaked) {
+			t.Fatalf("test output leaked %q: %q", leaked, result.Output)
+		}
+	}
+}
+
 func TestGitDiffScannerIncludesCommittedAndUncommittedChanges(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

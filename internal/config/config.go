@@ -37,13 +37,14 @@ type QueueConfig struct {
 }
 
 type WorkerConfig struct {
-	Enabled                   bool           `yaml:"enabled"`
-	CodexBinary               string         `yaml:"codex_binary"`
-	JobRoot                   string         `yaml:"job_root"`
-	StaleLeaseAfterMinutes    int            `yaml:"stale_lease_after_minutes"`
-	NoActivityTimeoutMinutes  int            `yaml:"no_activity_timeout_minutes"`
-	PhaseNoActivityTimeouts   map[string]int `yaml:"phase_no_activity_timeout_minutes"`
-	AbsoluteJobTimeoutMinutes int            `yaml:"absolute_job_timeout_minutes"`
+	Enabled                      bool           `yaml:"enabled"`
+	CodexBinary                  string         `yaml:"codex_binary"`
+	JobRoot                      string         `yaml:"job_root"`
+	StaleLeaseAfterMinutes       int            `yaml:"stale_lease_after_minutes"`
+	NoActivityTimeoutMinutes     int            `yaml:"no_activity_timeout_minutes"`
+	PhaseNoActivityTimeouts      map[string]int `yaml:"phase_no_activity_timeout_minutes"`
+	AbsoluteJobTimeoutMinutes    int            `yaml:"absolute_job_timeout_minutes"`
+	ImplementationRepairAttempts int            `yaml:"implementation_repair_attempts"`
 }
 
 type RepoConfig struct {
@@ -128,6 +129,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Worker.AbsoluteJobTimeoutMinutes == 0 {
 		c.Worker.AbsoluteJobTimeoutMinutes = 720
+	}
+	if c.Worker.ImplementationRepairAttempts == 0 {
+		c.Worker.ImplementationRepairAttempts = 8
 	}
 	if c.Worker.PhaseNoActivityTimeouts == nil {
 		c.Worker.PhaseNoActivityTimeouts = map[string]int{

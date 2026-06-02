@@ -203,29 +203,57 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 		_ = w.Queue.SetState(ctx, job.ID, queue.StateFailed, err.Error())
 		return err
 	}
-	result, err := w.Runner.RunCodex(ctx, CodexInput{Job: job, Repo: repo, Workspace: ws, Prompt: prepared.Text, ImageFiles: prepared.ImageFiles}, func() {
-		_ = w.Queue.TouchActivity(ctx, job.ID)
-	})
-	if err != nil {
-		return w.codexFailure(ctx, repo, job, ws, "implement", result.PublicReport, err)
-	}
-	if result.Status == "needs_plan_revision" {
-		_ = w.comment(ctx, job, "Codex 需要修订计划。\n\n- 状态: `waiting_human`\n- 详情已保存在内部审计日志中。")
-		return w.Queue.SetState(ctx, job.ID, queue.StateWaitingHuman, "needs_plan_revision")
-	}
-	result.PublicReport = appendPublicSection(result.PublicReport, w.publishScreenshotArtifacts(job, ws))
-	if err := w.Queue.SetState(ctx, job.ID, queue.StateTesting, ""); err != nil {
-		return err
-	}
-	tests, err := w.Runner.RunTests(ctx, ws.RepoDir, repo.TestCommands, func() { _ = w.Queue.TouchActivity(ctx, job.ID) })
-	if err != nil || !tests.Passed {
-		report := appendPublicSection(result.PublicReport, tests.Output)
-		if err != nil {
-			return w.codexFailure(ctx, repo, job, ws, "testing", report, err)
+	result := CodexResult{}
+	repairAttempts := 0
+	maxRepairAttempts := w.implementationRepairAttempts()
+	prompt := prepared.Text
+	imageFiles := append([]string(nil), prepared.ImageFiles...)
+	for {
+		if repairAttempts > 0 {
+			if err := w.Queue.SetState(ctx, job.ID, queue.StateImplementing, "auto_repair"); err != nil {
+				return err
+			}
 		}
-		return w.codexFailure(ctx, repo, job, ws, "testing", report, errors.New("tests_failed"))
+		result, err = w.Runner.RunCodex(ctx, CodexInput{Job: job, Repo: repo, Workspace: ws, Prompt: prompt, ImageFiles: imageFiles}, func() {
+			_ = w.Queue.TouchActivity(ctx, job.ID)
+		})
+		if err != nil {
+			report := w.implementationAttemptReport(ctx, repo, job, ws, result.PublicReport)
+			if repairAttempts >= maxRepairAttempts {
+				return w.requestImplementationPlanRevision(ctx, job, report, "auto_repair_budget_exhausted")
+			}
+			repairAttempts++
+			prompt = repairPrompt(prepared.Text, repairAttempts, maxRepairAttempts, "Codex execution did not complete.", report)
+			imageFiles = mergeImageFiles(prepared.ImageFiles, publicScreenshotImageFiles(ws))
+			continue
+		}
+		if result.Status == "needs_plan_revision" {
+			_ = w.comment(ctx, job, "Codex 需要修订计划。\n\n- 状态: `waiting_human`\n- 详情已保存在内部审计日志中。")
+			return w.Queue.SetState(ctx, job.ID, queue.StateWaitingHuman, "needs_plan_revision")
+		}
+		result.PublicReport = appendPublicSection(result.PublicReport, w.publishScreenshotArtifacts(job, ws))
+		if err := w.Queue.SetState(ctx, job.ID, queue.StateTesting, ""); err != nil {
+			return err
+		}
+		tests, testErr := w.Runner.RunTests(ctx, ws.RepoDir, repo.TestCommands, func() { _ = w.Queue.TouchActivity(ctx, job.ID) })
+		if testErr == nil && tests.Passed {
+			break
+		}
+		report := appendPublicSection(result.PublicReport, tests.Output)
+		report = w.implementationAttemptReport(ctx, repo, job, ws, report)
+		if repairAttempts >= maxRepairAttempts {
+			reason := "auto_repair_budget_exhausted"
+			if testErr != nil {
+				reason = appendInternalError(testErr.Error(), reason)
+			}
+			return w.requestImplementationPlanRevision(ctx, job, report, reason)
+		}
+		repairAttempts++
+		prompt = repairPrompt(prepared.Text, repairAttempts, maxRepairAttempts, "Gateway verification did not pass.", report)
+		imageFiles = mergeImageFiles(prepared.ImageFiles, publicScreenshotImageFiles(ws))
 	}
 	result.PublicReport = appendPublicSection(result.PublicReport, w.publishScreenshotArtifacts(job, ws))
+	result.PublicReport = appendPublicSection(result.PublicReport, autoRepairSummary(repairAttempts))
 	result.PublicReport = appendGatewayVerification(result.PublicReport, repo.TestCommands)
 	files, err := w.changedFiles(ctx, ws.RepoDir, job.BaseBranch)
 	if err != nil {
@@ -269,6 +297,59 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 	_ = w.Queue.SetPRNumber(ctx, job.ID, pr.Number)
 	_ = w.comment(ctx, job, implementationComment(pr.Number, result))
 	return w.Queue.SetState(ctx, job.ID, queue.StateDone, "")
+}
+
+func (w *Worker) implementationRepairAttempts() int {
+	if w.Config != nil && w.Config.Worker.ImplementationRepairAttempts > 0 {
+		return w.Config.Worker.ImplementationRepairAttempts
+	}
+	return 8
+}
+
+func (w *Worker) implementationAttemptReport(ctx context.Context, repo config.RepoConfig, job queue.Job, ws sandbox.Workspace, report string) string {
+	report = appendPublicSection(report, w.publishScreenshotArtifacts(job, ws))
+	if files, err := w.changedFiles(ctx, ws.RepoDir, job.BaseBranch); err == nil {
+		report = appendPublicSection(report, publicartifact.Build(ws.RepoDir, files, repo.DenyPaths))
+	}
+	return report
+}
+
+func (w *Worker) requestImplementationPlanRevision(ctx context.Context, job queue.Job, report, lastError string) error {
+	if err := w.commentWithFallback(ctx, job, implementationPlanRevisionComment(report), implementationPlanRevisionComment("")); err != nil {
+		lastError = appendInternalError(lastError, "public_comment_failed")
+	}
+	return w.Queue.SetState(ctx, job.ID, queue.StateWaitingHuman, lastError)
+}
+
+func implementationPlanRevisionComment(report string) string {
+	return withPublicReport("Codex 需要修订计划。\n\n- 状态: `waiting_human`\n- 原因: 自动修复预算已耗尽，需要重新规划后继续。", report)
+}
+
+func repairPrompt(basePrompt string, attempt, maxAttempts int, reason, report string) string {
+	report = publicreport.Sanitize(report)
+	if report == publicreport.Fallback {
+		report = "Safe diagnostics were unavailable."
+	}
+	return strings.Join([]string{
+		basePrompt,
+		"",
+		"Repair the implementation in the existing workspace.",
+		fmt.Sprintf("This is automatic repair attempt %d of %d.", attempt, maxAttempts),
+		reason,
+		"Use the safe diagnostics below to update the workspace and then provide one final response.",
+		"Inspect local failure artifacts left by verification commands, including test-results/, playwright-report/, and .codex-gateway-artifacts/screenshots/ when present.",
+		"Do not ask the user questions, do not wait for approval, and do not stop at analysis.",
+		"",
+		"Safe diagnostics from the previous attempt:",
+		report,
+	}, "\n")
+}
+
+func autoRepairSummary(repairAttempts int) string {
+	if repairAttempts <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("Gateway auto-repair:\n- Repair attempts: %d\n- Earlier implementation diagnostics were handled inside this job.", repairAttempts)
 }
 
 func planComment(result CodexResult) string {
@@ -366,6 +447,7 @@ func (w *Worker) publishScreenshotArtifacts(job queue.Job, ws sandbox.Workspace)
 		return ""
 	}
 	used := map[string]bool{}
+	markExistingPublicArtifacts(publicDir, used)
 	lines := []string{"Visual artifacts:"}
 	published := 0
 	for _, entry := range entries {
@@ -401,6 +483,56 @@ func (w *Worker) publishScreenshotArtifacts(job queue.Job, ws sandbox.Workspace)
 		return ""
 	}
 	return strings.Join(lines, "\n")
+}
+
+func markExistingPublicArtifacts(publicDir string, used map[string]bool) {
+	entries, err := os.ReadDir(publicDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			used[entry.Name()] = true
+		}
+	}
+}
+
+func publicScreenshotImageFiles(ws sandbox.Workspace) []string {
+	publicDir := filepath.Join(ws.ArtifactsDir, "public")
+	entries, err := os.ReadDir(publicDir)
+	if err != nil {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var files []string
+	for _, entry := range entries {
+		if entry.IsDir() || suspiciousArtifactName(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(publicDir, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > maxScreenshotBytes {
+			continue
+		}
+		if !allowedScreenshotExt(filepath.Ext(entry.Name())) {
+			continue
+		}
+		files = append(files, path)
+	}
+	return files
+}
+
+func mergeImageFiles(primary, additional []string) []string {
+	seen := map[string]bool{}
+	var merged []string
+	for _, file := range append(append([]string(nil), primary...), additional...) {
+		if strings.TrimSpace(file) == "" || seen[file] {
+			continue
+		}
+		seen[file] = true
+		merged = append(merged, file)
+	}
+	return merged
 }
 
 func safeArtifactDirectory(dir string) bool {

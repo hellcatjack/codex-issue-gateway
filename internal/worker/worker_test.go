@@ -92,6 +92,122 @@ func TestWorkerCreatesPRAfterTestsAndDiffPass(t *testing.T) {
 	}
 }
 
+func TestWorkerAutoRepairsVerificationFailureBeforeCreatingPR(t *testing.T) {
+	deps := newWorkerTestDeps(t)
+	job := deps.createQueuedJob(t, "implement")
+	deps.seedIssueContext(job, "/codex implement")
+	deps.Runner.CodexResults = []CodexResult{
+		{
+			Status:       "completed",
+			PublicReport: "Summary:\n- Added the initial Bible TTS placement regression.",
+		},
+		{
+			Status:       "completed",
+			PublicReport: "Summary:\n- Repaired the Bible TTS placement assertion.",
+		},
+	}
+	deps.Runner.TestResults = []TestResult{
+		{
+			Passed: false,
+			Output: "Gateway verification failed:\n- Command 4: failed with exit code 1\nSafe failure output:\nExpected: <= 3",
+		},
+		{Passed: true},
+	}
+	deps.Diff.Files = []string{"tests/e2e/bible-local-tts.spec.ts"}
+
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := deps.Queue.GetJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != queue.StateDone {
+		t.Fatalf("state=%s last_error=%q", got.State, got.LastError)
+	}
+	if deps.Runner.CodexCalls != 2 || deps.Runner.TestCalls != 2 {
+		t.Fatalf("codex calls=%d test calls=%d", deps.Runner.CodexCalls, deps.Runner.TestCalls)
+	}
+	if len(deps.Runner.CodexInputs) < 2 {
+		t.Fatalf("codex inputs = %#v", deps.Runner.CodexInputs)
+	}
+	repairPrompt := deps.Runner.CodexInputs[1].Prompt
+	for _, want := range []string{"Repair the implementation", "Gateway verification failed", "Expected: <= 3", "Inspect local failure artifacts", "Do not ask the user questions"} {
+		if !strings.Contains(repairPrompt, want) {
+			t.Fatalf("repair prompt missing %q: %s", want, repairPrompt)
+		}
+	}
+	if len(deps.GitHub.PullRequests) != 1 {
+		t.Fatalf("pull requests = %#v", deps.GitHub.PullRequests)
+	}
+	for _, comment := range deps.GitHub.Comments {
+		if strings.Contains(comment.Body, "Codex 执行失败") || strings.Contains(comment.Body, "状态: `failed`") {
+			t.Fatalf("unexpected failure comment: %s", comment.Body)
+		}
+	}
+	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
+	for _, want := range []string{"Codex 已创建 PR", "Gateway auto-repair", "Repair attempts: 1"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("implementation comment missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestWorkerRequestsPlanRevisionWhenAutoRepairBudgetIsExhausted(t *testing.T) {
+	deps := newWorkerTestDeps(t)
+	deps.Worker.Config = &config.Config{Worker: config.WorkerConfig{ImplementationRepairAttempts: 1}}
+	job := deps.createQueuedJob(t, "implement")
+	deps.seedIssueContext(job, "/codex implement")
+	deps.Runner.CodexResults = []CodexResult{
+		{Status: "completed", PublicReport: "Summary:\n- Added the initial assertion."},
+		{Status: "completed", PublicReport: "Summary:\n- Tried to repair the assertion."},
+	}
+	deps.Runner.TestResults = []TestResult{
+		{
+			Passed: false,
+			Output: "Gateway verification failed:\n- Command 4: failed with exit code 1\nSafe failure output:\nExpected: <= 3",
+		},
+		{
+			Passed: false,
+			Output: "Gateway verification failed:\n- Command 4: failed with exit code 1\nSafe failure output:\nExpected: <= 3",
+		},
+	}
+	deps.Diff.Files = []string{"tests/e2e/bible-local-tts.spec.ts"}
+
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := deps.Queue.GetJob(context.Background(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != queue.StateWaitingHuman || got.LastError != "auto_repair_budget_exhausted" {
+		t.Fatalf("job=%#v", got)
+	}
+	if deps.Runner.CodexCalls != 2 || deps.Runner.TestCalls != 2 {
+		t.Fatalf("codex calls=%d test calls=%d", deps.Runner.CodexCalls, deps.Runner.TestCalls)
+	}
+	if len(deps.GitHub.PullRequests) != 0 {
+		t.Fatalf("pull requests = %#v", deps.GitHub.PullRequests)
+	}
+	if len(deps.GitHub.Comments) == 0 {
+		t.Fatal("expected plan revision comment")
+	}
+	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
+	for _, want := range []string{"Codex 需要修订计划", "自动修复预算已耗尽", "Gateway verification failed"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("plan revision comment missing %q: %s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"Codex 执行失败", "状态: `failed`"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("plan revision comment looked like a failed implement result: %s", body)
+		}
+	}
+}
+
 func TestWorkerRunsAgentSetupBeforeCodex(t *testing.T) {
 	deps := newWorkerTestDeps(t)
 	deps.Worker.Repo.AgentSetupCommands = []string{"test -d node_modules || cp -a /cache/node_modules ./node_modules"}
@@ -374,8 +490,9 @@ func TestWorkerPRIncludesSafeCodexReport(t *testing.T) {
 	}
 }
 
-func TestWorkerImplementationFailureCommentsWithSafeArtifactPreview(t *testing.T) {
+func TestWorkerImplementationCodexFailureRequestsPlanRevisionWithSafeArtifactPreview(t *testing.T) {
 	deps := newWorkerTestDeps(t)
+	deps.Worker.Config = &config.Config{Worker: config.WorkerConfig{ImplementationRepairAttempts: 1}}
 	job := deps.createQueuedJob(t, "implement")
 	deps.seedIssueContext(job, "/codex implement")
 	deps.Runner.Err = errors.New("process failed with log at /tmp/job/output.log and OPENAI_API_KEY=sk-proj-secret")
@@ -384,33 +501,41 @@ func TestWorkerImplementationFailureCommentsWithSafeArtifactPreview(t *testing.T
 	}
 	deps.Diff.Files = []string{"docs/failure-preview.md"}
 
-	if err := deps.Worker.RunOne(context.Background()); err == nil {
-		t.Fatal("expected runner error")
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 
 	got, err := deps.Queue.GetJob(context.Background(), job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != queue.StateFailed {
-		t.Fatalf("state=%s", got.State)
+	if got.State != queue.StateWaitingHuman || got.LastError != "auto_repair_budget_exhausted" {
+		t.Fatalf("job=%#v", got)
 	}
 	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
-	for _, want := range []string{"Codex 执行失败", "阶段: `implement`", "Artifact preview:", "`docs/failure-preview.md`", "Safe partial artifact content"} {
+	for _, want := range []string{"Codex 需要修订计划", "自动修复预算已耗尽", "Artifact preview:", "`docs/failure-preview.md`", "Safe partial artifact content"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("failure comment missing %q: %s", want, body)
+			t.Fatalf("plan revision comment missing %q: %s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"Codex 执行失败", "状态: `failed`"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("plan revision comment looked like a failed implement result: %s", body)
 		}
 	}
 	for _, leaked := range []string{"/tmp/job", "OPENAI_API_KEY", "sk-proj-secret"} {
 		if strings.Contains(body, leaked) {
-			t.Fatalf("failure comment leaked %q: %s", leaked, body)
+			t.Fatalf("plan revision comment leaked %q: %s", leaked, body)
 		}
 	}
 }
 
-func TestWorkerPublishesScreenshotArtifactsInFailureComment(t *testing.T) {
+func TestWorkerPublishesScreenshotArtifactsInPlanRevisionComment(t *testing.T) {
 	deps := newWorkerTestDeps(t)
-	deps.Worker.Config = &config.Config{Server: config.ServerConfig{PublicBaseURL: "https://gateway.example.test"}}
+	deps.Worker.Config = &config.Config{
+		Server: config.ServerConfig{PublicBaseURL: "https://gateway.example.test"},
+		Worker: config.WorkerConfig{ImplementationRepairAttempts: 1},
+	}
 	job := deps.createQueuedJob(t, "implement")
 	deps.seedIssueContext(job, "/codex implement")
 	deps.Runner.Err = errors.New("process failed")
@@ -418,22 +543,25 @@ func TestWorkerPublishesScreenshotArtifactsInFailureComment(t *testing.T) {
 		".codex-gateway-artifacts/screenshots/failure.png": tinyPNG(),
 	}
 
-	if err := deps.Worker.RunOne(context.Background()); err == nil {
-		t.Fatal("expected runner error")
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 
 	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
-	for _, want := range []string{"Visual artifacts:", "![failure.png](https://gateway.example.test/artifacts/" + job.ID + "/failure.png)"} {
+	for _, want := range []string{"Visual artifacts:", "![failure-2.png](https://gateway.example.test/artifacts/" + job.ID + "/failure-2.png)"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("failure comment missing %q: %s", want, body)
 		}
 	}
+	if strings.Contains(body, "Codex 执行失败") || strings.Contains(body, "状态: `failed`") {
+		t.Fatalf("unexpected failed implement wording: %s", body)
+	}
 	for _, leaked := range []string{".codex-gateway-artifacts", deps.Worker.JobRoot} {
 		if strings.Contains(body, leaked) {
-			t.Fatalf("failure comment leaked %q: %s", leaked, body)
+			t.Fatalf("plan revision comment leaked %q: %s", leaked, body)
 		}
 	}
-	published := filepath.Join(deps.Worker.JobRoot, job.ID, "artifacts", "public", "failure.png")
+	published := filepath.Join(deps.Worker.JobRoot, job.ID, "artifacts", "public", "failure-2.png")
 	if data, err := os.ReadFile(published); err != nil || string(data) != string(tinyPNG()) {
 		t.Fatalf("published screenshot data err=%v len=%d", err, len(data))
 	}
@@ -485,7 +613,10 @@ func TestWorkerPublishesScreenshotArtifactsCreatedDuringSuccessfulTests(t *testi
 
 func TestWorkerRejectsScreenshotSymlinkStagingDir(t *testing.T) {
 	deps := newWorkerTestDeps(t)
-	deps.Worker.Config = &config.Config{Server: config.ServerConfig{PublicBaseURL: "https://gateway.example.test"}}
+	deps.Worker.Config = &config.Config{
+		Server: config.ServerConfig{PublicBaseURL: "https://gateway.example.test"},
+		Worker: config.WorkerConfig{ImplementationRepairAttempts: 1},
+	}
 	job := deps.createQueuedJob(t, "implement")
 	deps.seedIssueContext(job, "/codex implement")
 	outside := t.TempDir()
@@ -500,8 +631,8 @@ func TestWorkerRejectsScreenshotSymlinkStagingDir(t *testing.T) {
 		".codex-gateway-artifacts": outside,
 	}
 
-	if err := deps.Worker.RunOne(context.Background()); err == nil {
-		t.Fatal("expected runner error")
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 
 	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
@@ -513,8 +644,9 @@ func TestWorkerRejectsScreenshotSymlinkStagingDir(t *testing.T) {
 	}
 }
 
-func TestWorkerImplementationTestFailureCommentsWithSafeSummary(t *testing.T) {
+func TestWorkerImplementationTestFailureRequestsPlanRevisionWithSafeSummary(t *testing.T) {
 	deps := newWorkerTestDeps(t)
+	deps.Worker.Config = &config.Config{Worker: config.WorkerConfig{ImplementationRepairAttempts: 1}}
 	job := deps.createQueuedJob(t, "implement")
 	deps.seedIssueContext(job, "/codex implement")
 	deps.Runner.CodexResult = CodexResult{
@@ -530,48 +662,54 @@ func TestWorkerImplementationTestFailureCommentsWithSafeSummary(t *testing.T) {
 	}
 	deps.Diff.Files = []string{"docs/failure-preview.md"}
 
-	if err := deps.Worker.RunOne(context.Background()); err == nil || err.Error() != "tests_failed" {
-		t.Fatalf("expected tests_failed error, got %v", err)
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 
 	got, err := deps.Queue.GetJob(context.Background(), job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != queue.StateFailed {
-		t.Fatalf("state=%s", got.State)
+	if got.State != queue.StateWaitingHuman || got.LastError != "auto_repair_budget_exhausted" {
+		t.Fatalf("job=%#v", got)
 	}
 	if len(deps.GitHub.Comments) == 0 {
-		t.Fatal("expected failure comment")
+		t.Fatal("expected plan revision comment")
 	}
 	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
-	for _, want := range []string{"Codex 执行失败", "阶段: `testing`", "Updated reader placement logic", "Gateway verification failed", "`go test ./...`: failed", "Artifact preview:", "Safe partial artifact content"} {
+	for _, want := range []string{"Codex 需要修订计划", "自动修复预算已耗尽", "Updated reader placement logic", "Gateway verification failed", "`go test ./...`: failed", "Artifact preview:", "Safe partial artifact content"} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("failure comment missing %q: %s", want, body)
+			t.Fatalf("plan revision comment missing %q: %s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"Codex 执行失败", "状态: `failed`"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("plan revision comment looked like a failed implement result: %s", body)
 		}
 	}
 }
 
-func TestWorkerFailureRecordsCommentError(t *testing.T) {
+func TestWorkerPlanRevisionRecordsCommentError(t *testing.T) {
 	deps := newWorkerTestDeps(t)
+	deps.Worker.Config = &config.Config{Worker: config.WorkerConfig{ImplementationRepairAttempts: 1}}
 	job := deps.createQueuedJob(t, "implement")
 	deps.seedIssueContext(job, "/codex implement")
 	deps.Worker.GitHub = failingCommentClient{Client: deps.GitHub, Err: errors.New("github unavailable")}
 	deps.Runner.Err = errors.New("process failed")
 
-	if err := deps.Worker.RunOne(context.Background()); err == nil {
-		t.Fatal("expected runner error")
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 
 	got, err := deps.Queue.GetJob(context.Background(), job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != queue.StateFailed {
+	if got.State != queue.StateWaitingHuman {
 		t.Fatalf("state=%s", got.State)
 	}
-	if !strings.Contains(got.LastError, "process failed") || !strings.Contains(got.LastError, "public_comment_failed") {
-		t.Fatalf("last_error did not preserve execution and comment failures: %q", got.LastError)
+	if !strings.Contains(got.LastError, "auto_repair_budget_exhausted") || !strings.Contains(got.LastError, "public_comment_failed") {
+		t.Fatalf("last_error did not preserve repair exhaustion and comment failures: %q", got.LastError)
 	}
 	if strings.Contains(got.LastError, "github unavailable") {
 		t.Fatalf("last_error exposed raw comment transport error: %q", got.LastError)
@@ -672,20 +810,26 @@ type workerTestDeps struct {
 
 type fakeRunner struct {
 	CodexResult     CodexResult
+	CodexResults    []CodexResult
 	CommandResult   CommandResult
 	TestResult      TestResult
+	TestResults     []TestResult
 	LastInput       CodexInput
+	CodexInputs     []CodexInput
 	CommandCalls    [][]string
 	CodexCalls      int
+	TestCalls       int
 	Files           map[string]string
 	BinaryFiles     map[string][]byte
 	TestBinaryFiles map[string][]byte
 	Symlinks        map[string]string
 	Err             error
+	Errs            []error
 }
 
 func (r *fakeRunner) RunCodex(ctx context.Context, input CodexInput, onActivity func()) (CodexResult, error) {
 	r.LastInput = input
+	r.CodexInputs = append(r.CodexInputs, input)
 	r.CodexCalls++
 	if onActivity != nil {
 		onActivity()
@@ -720,6 +864,13 @@ func (r *fakeRunner) RunCodex(ctx context.Context, input CodexInput, onActivity 
 	if r.Err != nil {
 		return CodexResult{}, r.Err
 	}
+	callIndex := r.CodexCalls - 1
+	if callIndex < len(r.Errs) && r.Errs[callIndex] != nil {
+		return CodexResult{}, r.Errs[callIndex]
+	}
+	if callIndex < len(r.CodexResults) {
+		return r.CodexResults[callIndex], nil
+	}
 	return r.CodexResult, nil
 }
 
@@ -732,6 +883,7 @@ func (r *fakeRunner) RunCommands(ctx context.Context, repoDir string, commands [
 }
 
 func (r *fakeRunner) RunTests(ctx context.Context, repoDir string, commands []string, onActivity func()) (TestResult, error) {
+	r.TestCalls++
 	if onActivity != nil {
 		onActivity()
 	}
@@ -743,6 +895,10 @@ func (r *fakeRunner) RunTests(ctx context.Context, repoDir string, commands []st
 		if err := os.WriteFile(path, body, 0o600); err != nil {
 			return TestResult{}, err
 		}
+	}
+	callIndex := r.TestCalls - 1
+	if callIndex < len(r.TestResults) {
+		return r.TestResults[callIndex], nil
 	}
 	return r.TestResult, nil
 }
