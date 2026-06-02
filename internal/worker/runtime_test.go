@@ -138,11 +138,47 @@ func TestLocalRunnerReturnsSafeSummaryForFailedTestCommand(t *testing.T) {
 	if result.Passed {
 		t.Fatalf("result=%#v", result)
 	}
-	if !strings.Contains(result.Output, "Gateway verification failed") || !strings.Contains(result.Output, "`printf 'safe failure detail'; exit 1`: failed") {
+	if !strings.Contains(result.Output, "Gateway verification failed") ||
+		!strings.Contains(result.Output, "- Command 1: failed with exit code 1") ||
+		!strings.Contains(result.Output, "Safe failure output:\nsafe failure detail") {
 		t.Fatalf("test output missing failure summary: %q", result.Output)
 	}
 	if strings.Contains(result.Output, "/tmp/") {
 		t.Fatalf("test output leaked local path: %q", result.Output)
+	}
+}
+
+func TestLocalRunnerReportsOnlyTheFailedTestCommandAsFailed(t *testing.T) {
+	dir := t.TempDir()
+	runner := LocalRunner{}
+
+	result, err := runner.RunTests(context.Background(), dir, []string{
+		"printf ok",
+		"printf 'safe failure detail'; printf ' /tmp/private OPENAI_API_KEY=sk-proj-secret' >&2; exit 7",
+		"printf should-not-run",
+	}, nil)
+
+	if err == nil {
+		t.Fatal("expected test command failure")
+	}
+	if result.Passed {
+		t.Fatalf("result=%#v", result)
+	}
+	for _, want := range []string{
+		"Gateway verification failed",
+		"- Command 1: passed",
+		"- Command 2: failed with exit code 7",
+		"Safe failure output:",
+		"safe failure detail",
+	} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("test output missing %q: %q", want, result.Output)
+		}
+	}
+	for _, unwanted := range []string{"Command 1: failed", "Command 3", "/tmp/private", "OPENAI_API_KEY", "sk-proj-secret"} {
+		if strings.Contains(result.Output, unwanted) {
+			t.Fatalf("test output contained %q: %q", unwanted, result.Output)
+		}
 	}
 }
 

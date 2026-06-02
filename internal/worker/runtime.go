@@ -137,54 +137,72 @@ func publicCommandReport(commands []string, result runner.TestCommandsResult) st
 	if result.Passed {
 		return ""
 	}
-	lines := []string{"Gateway workspace preparation failed:"}
-	for i, process := range result.Results {
-		command := "configured setup command"
-		if i < len(commands) && strings.TrimSpace(commands[i]) != "" {
-			command = strings.TrimSpace(commands[i])
-		}
-		status := "failed"
-		if process.ExitCode != 0 {
-			status = fmt.Sprintf("failed with exit code %d", process.ExitCode)
-		}
-		line := "- `" + command + "`: " + status
-		if publicreport.Sanitize(line) == line {
-			lines = append(lines, line)
-		} else {
-			lines = append(lines, "- configured setup command: failed")
-		}
-	}
-	if len(lines) == 1 {
-		lines = append(lines, "- configured setup command: failed")
-	}
-	return publicreport.Sanitize(strings.Join(lines, "\n"))
+	return publicProcessReport("Gateway workspace preparation failed:", commands, result)
 }
 
 func publicTestReport(commands []string, result runner.TestCommandsResult) string {
 	if result.Passed {
 		return ""
 	}
-	lines := []string{"Gateway verification failed:"}
+	return publicProcessReport("Gateway verification failed:", commands, result)
+}
+
+func publicProcessReport(title string, commands []string, result runner.TestCommandsResult) string {
+	lines := []string{title}
+	failedIndex := firstFailedProcessIndex(result)
 	for i, process := range result.Results {
-		command := "configured test command"
-		if i < len(commands) && strings.TrimSpace(commands[i]) != "" {
-			command = strings.TrimSpace(commands[i])
+		status := "passed"
+		if i == failedIndex {
+			status = "failed"
+			if process.ExitCode != 0 {
+				status = fmt.Sprintf("failed with exit code %d", process.ExitCode)
+			}
 		}
-		status := "failed"
-		if process.ExitCode != 0 {
-			status = fmt.Sprintf("failed with exit code %d", process.ExitCode)
+		line := fmt.Sprintf("- Command %d: %s", i+1, status)
+		if label := safeCommandLabel(commands, i); label != "" {
+			line += " (" + label + ")"
 		}
-		line := "- `" + command + "`: " + status
-		if publicreport.Sanitize(line) == line {
-			lines = append(lines, line)
-		} else {
-			lines = append(lines, "- configured test command: failed")
+		lines = append(lines, line)
+		if i == failedIndex {
+			if excerpt := safeProcessOutputExcerpt(strings.TrimSpace(process.Stdout + "\n" + process.Stderr)); excerpt != "" {
+				lines = append(lines, "Safe failure output:\n"+excerpt)
+			}
 		}
 	}
 	if len(lines) == 1 {
-		lines = append(lines, "- configured test command: failed")
+		lines = append(lines, "- Command 1: failed")
 	}
 	return publicreport.Sanitize(strings.Join(lines, "\n"))
+}
+
+func firstFailedProcessIndex(result runner.TestCommandsResult) int {
+	for i, process := range result.Results {
+		if process.ExitCode != 0 {
+			return i
+		}
+	}
+	if !result.Passed && len(result.Results) > 0 {
+		return len(result.Results) - 1
+	}
+	return -1
+}
+
+func safeCommandLabel(commands []string, index int) string {
+	if index >= len(commands) {
+		return ""
+	}
+	command := strings.TrimSpace(commands[index])
+	if command == "" || strings.Contains(command, "`") {
+		return ""
+	}
+	if len(command) > 160 {
+		command = strings.TrimSpace(command[:160]) + "..."
+	}
+	label := "`" + command + "`"
+	if publicreport.Sanitize(label) != label {
+		return ""
+	}
+	return label
 }
 
 type GitDiffScanner struct{}
