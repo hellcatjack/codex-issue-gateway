@@ -203,6 +203,7 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 		return err
 	}
 	result := CodexResult{}
+	titleResult := CodexResult{}
 	repairAttempts := 0
 	maxRepairAttempts := w.implementationRepairAttempts()
 	visualAttempts := 0
@@ -272,6 +273,7 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 			visualConfirmationFingerprint = ""
 			lastVisualReport = ""
 		}
+		titleResult = result
 		if err := w.Queue.SetState(ctx, job.ID, queue.StateTesting, ""); err != nil {
 			return err
 		}
@@ -339,8 +341,9 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 	if err := w.Queue.SetState(ctx, job.ID, queue.StateCreatingPR, ""); err != nil {
 		return err
 	}
+	changeTitle := implementationChangeTitle(job, titleResult, files)
 	if isGitWorkspace(ws.RepoDir) {
-		committed, err := sandbox.CommitAll(ctx, ws.RepoDir, repo.CommitAuthor, "Codex changes for issue #"+itoa(job.IssueNumber))
+		committed, err := sandbox.CommitAll(ctx, ws.RepoDir, repo.CommitAuthor, changeTitle)
 		if err != nil {
 			_ = w.Queue.SetState(ctx, job.ID, queue.StateFailed, err.Error())
 			return err
@@ -356,7 +359,7 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 	}
 	pr, err := w.GitHub.CreatePullRequest(ctx, github.PullRequestInput{
 		RepoFullName: job.RepoFullName,
-		Title:        "Codex changes for issue #" + itoa(job.IssueNumber),
+		Title:        changeTitle,
 		Head:         pullRequestHead(repo, job.WorkBranch),
 		Base:         job.BaseBranch,
 		Body:         pullRequestBody(job, result),

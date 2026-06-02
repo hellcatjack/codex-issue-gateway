@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/hellcatjack/codex-issue-gateway/internal/github"
 	"github.com/hellcatjack/codex-issue-gateway/internal/issuecontext"
 	"github.com/hellcatjack/codex-issue-gateway/internal/issueimage"
+	"github.com/hellcatjack/codex-issue-gateway/internal/publiccomment"
 	"github.com/hellcatjack/codex-issue-gateway/internal/queue"
 )
 
@@ -75,7 +77,11 @@ func TestWorkerCreatesPRAfterTestsAndDiffPass(t *testing.T) {
 	deps := newWorkerTestDeps(t)
 	job := deps.createQueuedJob(t, "implement")
 	deps.seedIssueContext(job, "/codex implement")
-	deps.Runner.CodexResult = CodexResult{Status: "completed", Summary: "Changed README"}
+	deps.Runner.CodexResult = CodexResult{
+		Status:       "completed",
+		Summary:      "Changed README",
+		PublicReport: "Summary:\n- Add project setup guidance.",
+	}
 	deps.Runner.TestResult = TestResult{Passed: true}
 	deps.Diff.Files = []string{"README.md"}
 	if err := deps.Worker.RunOne(context.Background()); err != nil {
@@ -90,6 +96,119 @@ func TestWorkerCreatesPRAfterTestsAndDiffPass(t *testing.T) {
 	}
 	if deps.GitHub.PullRequests[0].Head != "hellcatjack:codex/issue-2-delivery-implement" {
 		t.Fatalf("pr head = %q", deps.GitHub.PullRequests[0].Head)
+	}
+	if deps.GitHub.PullRequests[0].Title != "Codex: Add project setup guidance (#2)" {
+		t.Fatalf("pr title = %q", deps.GitHub.PullRequests[0].Title)
+	}
+}
+
+func TestWorkerCommitsWithSummaryTitle(t *testing.T) {
+	deps := newWorkerTestDeps(t)
+	source := createGitFixtureRepo(t)
+	remote := t.TempDir()
+	runGitForWorkerTest(t, remote, "init", "--bare")
+	deps.Worker.Repo.LocalFixturePath = source
+	deps.Worker.Repo.ForkPushRemote = remote
+	job := deps.createQueuedJob(t, "implement")
+	deps.seedIssueContext(job, "/codex implement")
+	deps.Runner.CodexResult = CodexResult{
+		Status:       "completed",
+		PublicReport: "Summary:\n- Replace reader app icon assets.",
+	}
+	deps.Runner.Files = map[string]string{"README.md": "after\n"}
+	deps.Runner.TestResult = TestResult{Passed: true}
+	deps.Diff.Files = []string{"README.md"}
+
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	subject := gitOutputForWorkerTest(t, deps.Runner.LastInput.Workspace.RepoDir, "log", "-1", "--pretty=%s")
+	if subject != "Codex: Replace reader app icon assets (#2)" {
+		t.Fatalf("commit subject = %q", subject)
+	}
+	if len(deps.GitHub.PullRequests) != 1 || deps.GitHub.PullRequests[0].Title != subject {
+		t.Fatalf("pull request title = %#v, subject = %q", deps.GitHub.PullRequests, subject)
+	}
+}
+
+func TestImplementationChangeTitleUsesSafeSummary(t *testing.T) {
+	tests := []struct {
+		name   string
+		job    queue.Job
+		result CodexResult
+		files  []string
+		want   string
+	}{
+		{
+			name: "public report summary bullet",
+			job:  queue.Job{IssueNumber: 37},
+			result: CodexResult{
+				Summary:      "Generic fallback",
+				PublicReport: "Summary:\n- Replace the project icon assets.\n\nTests:\n- npm run build",
+			},
+			want: "Codex: Replace the project icon assets (#37)",
+		},
+		{
+			name: "codex summary fallback",
+			job:  queue.Job{IssueNumber: 38},
+			result: CodexResult{
+				Summary: "Document worker visual review",
+			},
+			want: "Codex: Document worker visual review (#38)",
+		},
+		{
+			name: "changed files fallback",
+			job:  queue.Job{IssueNumber: 39},
+			files: []string{
+				"src/features/reader/ReaderPage.tsx",
+				"src/features/reader/translationNote.ts",
+			},
+			want: "Codex: Update src/features/reader (#39)",
+		},
+		{
+			name: "sensitive report fallback",
+			job:  queue.Job{IssueNumber: 40},
+			result: CodexResult{
+				PublicReport: "Summary:\n- Wrote OPENAI_API_KEY=sk-proj-secret to /home/user/.env",
+			},
+			want: "Codex changes for issue #40",
+		},
+		{
+			name: "long summary is trimmed",
+			job:  queue.Job{IssueNumber: 41},
+			result: CodexResult{
+				PublicReport: "Summary:\n- Add a detailed responsive translation comparison surface for continuous TTS playback and reader overlays",
+			},
+			want: "Codex: Add a detailed responsive translation comparison surface for continuous TTS playback and reader overlays (#41)",
+		},
+		{
+			name: "year prefix is preserved",
+			job:  queue.Job{IssueNumber: 42},
+			result: CodexResult{
+				PublicReport: "Summary:\n- 2026 reader compatibility improvements",
+			},
+			want: "Codex: 2026 reader compatibility improvements (#42)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := implementationChangeTitle(tt.job, tt.result, tt.files); got != tt.want {
+				t.Fatalf("title = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestImplementationChangeTitlePreservesIssueSuffixWhenTrimming(t *testing.T) {
+	title := implementationChangeTitle(queue.Job{IssueNumber: 77}, CodexResult{
+		PublicReport: "Summary:\n- " + strings.Repeat("a", 200),
+	}, nil)
+	if !strings.HasSuffix(title, "(#77)") {
+		t.Fatalf("title suffix was not preserved: %q", title)
+	}
+	if len([]byte(title)) > publiccomment.MaxPublicTitleBytes {
+		t.Fatalf("title is too long: %d bytes: %q", len([]byte(title)), title)
 	}
 }
 
@@ -155,6 +274,9 @@ func TestWorkerFeedsVisualReviewScreenshotsBackToCodexBeforePR(t *testing.T) {
 	}
 	if len(deps.GitHub.PullRequests) != 1 {
 		t.Fatalf("pull requests = %#v", deps.GitHub.PullRequests)
+	}
+	if deps.GitHub.PullRequests[0].Title != "Codex: Adjusted the TTS note width (#2)" {
+		t.Fatalf("visual review pr title = %q", deps.GitHub.PullRequests[0].Title)
 	}
 	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
 	if !strings.Contains(body, "Visual artifacts:") || !strings.Contains(body, "latest.png") {
@@ -1221,4 +1343,15 @@ func tinyPNG() []byte {
 		0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
 		0x42, 0x60, 0x82,
 	}
+}
+
+func gitOutputForWorkerTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v: %s", strings.Join(args, " "), err, string(out))
+	}
+	return strings.TrimSpace(string(out))
 }
