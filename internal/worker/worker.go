@@ -225,6 +225,7 @@ func (w *Worker) runImplementation(ctx context.Context, repo config.RepoConfig, 
 		}
 		return w.codexFailure(ctx, repo, job, ws, "testing", report, errors.New("tests_failed"))
 	}
+	result.PublicReport = appendPublicSection(result.PublicReport, w.publishScreenshotArtifacts(job, ws))
 	result.PublicReport = appendGatewayVerification(result.PublicReport, repo.TestCommands)
 	files, err := w.changedFiles(ctx, ws.RepoDir, job.BaseBranch)
 	if err != nil {

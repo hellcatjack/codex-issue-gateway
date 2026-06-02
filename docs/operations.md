@@ -84,12 +84,13 @@ For each job, the worker:
 4. Runs optional `agent_setup_commands`.
 5. Fetches fresh issue context from GitHub.
 6. Runs Codex with non-interactive execution rules.
-7. Publishes safe screenshot artifacts when the agent creates them.
+7. Publishes safe screenshot artifacts when Codex creates them.
 8. Runs configured gateway tests.
-9. Evaluates changed files against deny and review policy.
-10. Commits and pushes changes when files changed.
-11. Creates a Pull Request.
-12. Completes without a PR when no files changed.
+9. Publishes safe screenshot artifacts created by gateway test commands.
+10. Evaluates changed files against deny and review policy.
+11. Commits and pushes changes when files changed.
+12. Creates a Pull Request.
+13. Completes without a PR when no files changed.
 
 No-change completion is intentional. It prevents empty PRs when the current base branch already satisfies the issue.
 
@@ -122,13 +123,13 @@ This avoids killing legitimate long-running work solely because total elapsed ti
 
 ## Public Artifacts
 
-Agents may stage browser-visible screenshots under:
+Codex or gateway `test_commands` may stage browser-visible screenshots under:
 
 ```text
 .codex-gateway-artifacts/screenshots/
 ```
 
-The gateway validates file type, file size, symlinks, and suspicious names before copying safe images into the job artifact public directory. Public issue comments include image links only after this validation.
+The gateway validates file type, file size, symlinks, and suspicious names before copying safe images into the job artifact public directory. Public issue comments and PR bodies include image links only after this validation. This lets browser screenshots run outside the Codex sandbox as part of configured verification commands.
 
 The staging directory is removed from the repository workspace after publication.
 

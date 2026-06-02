@@ -442,6 +442,47 @@ func TestWorkerPublishesScreenshotArtifactsInFailureComment(t *testing.T) {
 	}
 }
 
+func TestWorkerPublishesScreenshotArtifactsCreatedDuringSuccessfulTests(t *testing.T) {
+	deps := newWorkerTestDeps(t)
+	deps.Worker.Config = &config.Config{Server: config.ServerConfig{PublicBaseURL: "https://gateway.example.test"}}
+	job := deps.createQueuedJob(t, "implement")
+	deps.seedIssueContext(job, "/codex implement")
+	deps.Runner.CodexResult = CodexResult{
+		Status:       "completed",
+		PublicReport: "Summary:\n- Updated reader placement logic.",
+	}
+	deps.Runner.TestResult = TestResult{Passed: true}
+	deps.Runner.TestBinaryFiles = map[string][]byte{
+		".codex-gateway-artifacts/screenshots/reader-1200px.png": tinyPNG(),
+	}
+	deps.Diff.Files = []string{"README.md"}
+
+	if err := deps.Worker.RunOne(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(deps.GitHub.Comments) == 0 {
+		t.Fatal("expected implementation comment")
+	}
+	body := deps.GitHub.Comments[len(deps.GitHub.Comments)-1].Body
+	for _, want := range []string{"Codex 已创建 PR", "Visual artifacts:", "![reader-1200px.png](https://gateway.example.test/artifacts/" + job.ID + "/reader-1200px.png)"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("implementation comment missing %q: %s", want, body)
+		}
+	}
+	if len(deps.GitHub.PullRequests) != 1 {
+		t.Fatalf("pull requests = %#v", deps.GitHub.PullRequests)
+	}
+	prBody := deps.GitHub.PullRequests[0].Body
+	if !strings.Contains(prBody, "![reader-1200px.png](https://gateway.example.test/artifacts/"+job.ID+"/reader-1200px.png)") {
+		t.Fatalf("pull request body missing visual artifact: %s", prBody)
+	}
+	published := filepath.Join(deps.Worker.JobRoot, job.ID, "artifacts", "public", "reader-1200px.png")
+	if data, err := os.ReadFile(published); err != nil || string(data) != string(tinyPNG()) {
+		t.Fatalf("published screenshot data err=%v len=%d", err, len(data))
+	}
+}
+
 func TestWorkerRejectsScreenshotSymlinkStagingDir(t *testing.T) {
 	deps := newWorkerTestDeps(t)
 	deps.Worker.Config = &config.Config{Server: config.ServerConfig{PublicBaseURL: "https://gateway.example.test"}}
@@ -630,16 +671,17 @@ type workerTestDeps struct {
 }
 
 type fakeRunner struct {
-	CodexResult   CodexResult
-	CommandResult CommandResult
-	TestResult    TestResult
-	LastInput     CodexInput
-	CommandCalls  [][]string
-	CodexCalls    int
-	Files         map[string]string
-	BinaryFiles   map[string][]byte
-	Symlinks      map[string]string
-	Err           error
+	CodexResult     CodexResult
+	CommandResult   CommandResult
+	TestResult      TestResult
+	LastInput       CodexInput
+	CommandCalls    [][]string
+	CodexCalls      int
+	Files           map[string]string
+	BinaryFiles     map[string][]byte
+	TestBinaryFiles map[string][]byte
+	Symlinks        map[string]string
+	Err             error
 }
 
 func (r *fakeRunner) RunCodex(ctx context.Context, input CodexInput, onActivity func()) (CodexResult, error) {
@@ -692,6 +734,15 @@ func (r *fakeRunner) RunCommands(ctx context.Context, repoDir string, commands [
 func (r *fakeRunner) RunTests(ctx context.Context, repoDir string, commands []string, onActivity func()) (TestResult, error) {
 	if onActivity != nil {
 		onActivity()
+	}
+	for name, body := range r.TestBinaryFiles {
+		path := filepath.Join(repoDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return TestResult{}, err
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			return TestResult{}, err
+		}
 	}
 	return r.TestResult, nil
 }
