@@ -182,6 +182,24 @@ func TestLocalRunnerReportsOnlyTheFailedTestCommandAsFailed(t *testing.T) {
 	}
 }
 
+func TestLocalRunnerIncludesTailOfLongFailedTestOutput(t *testing.T) {
+	dir := t.TempDir()
+	runner := LocalRunner{}
+
+	result, err := runner.RunTests(context.Background(), dir, []string{
+		"for i in $(seq 1 20); do printf 'passing line %02d\\n' \"$i\"; done; printf 'final failure detail\\n'; exit 1",
+	}, nil)
+
+	if err == nil {
+		t.Fatal("expected test command failure")
+	}
+	for _, want := range []string{"passing line 01", "passing line 20", "final failure detail"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("test output missing %q: %q", want, result.Output)
+		}
+	}
+}
+
 func TestGitDiffScannerIncludesCommittedAndUncommittedChanges(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

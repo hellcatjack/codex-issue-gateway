@@ -105,12 +105,14 @@ func safeProcessOutputExcerpt(output string) string {
 			continue
 		}
 		lines = append(lines, line)
-		if len(lines) >= 12 {
-			break
-		}
 	}
 	if len(lines) == 0 {
 		return ""
+	}
+	if len(lines) > 12 {
+		head := append([]string(nil), lines[:6]...)
+		tail := lines[len(lines)-6:]
+		return strings.Join(append(append(head, "..."), tail...), "\n")
 	}
 	return strings.Join(lines, "\n")
 }
